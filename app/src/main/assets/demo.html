@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Security Access Restricted</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght=400;500;700&display=swap');
+        :root {
+            --text-primary: #202124;
+            --text-secondary: #5f6368;
+            --accent-red: #D32F2F;
+            --bg-color: #FAFAFA;
+            --card-bg: #FFFFFF;
+        }
+        body {
+            margin: 0;
+            font-family: 'Roboto', sans-serif;
+            background-color: var(--bg-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        .container {
+            max-width: 400px;
+            width: 100%;
+            background: var(--card-bg);
+            padding: 32px;
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            text-align: center;
+            border-top: 4px solid var(--accent-red);
+        }
+        .icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 24px auto;
+            fill: var(--accent-red);
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin: 0 0 12px 0;
+        }
+        p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            margin: 0 0 24px 0;
+        }
+        .reason-box {
+            background-color: #FFF5F5;
+            border: 1px solid #FFEBED;
+            border-radius: 8px;
+            padding: 16px;
+            text-align: left;
+            margin-bottom: 24px;
+        }
+        .reason-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--accent-red);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .reason-item {
+            font-size: 13px;
+            color: #555;
+            display: flex;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .reason-item:last-child {
+            margin-bottom: 0;
+        }
+        .dot {
+            width: 6px;
+            height: 6px;
+            background-color: var(--accent-red);
+            border-radius: 50%;
+            margin-right: 8px;
+            display: inline-block;
+        }
+        .footer {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <svg class="icon" viewBox="0 0 24 24">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+        </svg>
+        <h1>Security Alert</h1>
+        <p>This application cannot be run on this device due to failure of security policy compliance verification checks.</p>
+        
+        <div class="reason-box">
+            <div class="reason-title">Possible Violations:</div>
+            <div class="reason-item"><span class="dot"></span>Root access or custom firmware detected.</div>
+            <div class="reason-item"><span class="dot"></span>Virtual/Emulator environment recognized.</div>
+            <div class="reason-item"><span class="dot"></span>Active VPN connection or network proxy enabled.</div>
+        </div>
+        
+        <div class="footer">Please ensure you are using a standard, secure physical device on public or standard carrier networks.</div>
+    </div>
+</body>
+</html>

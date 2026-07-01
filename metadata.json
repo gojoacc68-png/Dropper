@@ -1,0 +1,6 @@
+{
+  "name": "Asset Portal",
+  "description": "Secure offline local HTML hello-world simulation platform served straight from android-assets package space.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
