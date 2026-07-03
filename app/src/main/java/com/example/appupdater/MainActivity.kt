@@ -1,5 +1,6 @@
 package com.example.appupdater
 
+import androidx.compose.foundation.background
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -28,6 +29,17 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Scaffold
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.appupdater.ui.theme.MyApplicationTheme
 import com.example.appupdater.R
@@ -380,7 +392,17 @@ class MainActivity : ComponentActivity() {
         }
         
         setContent {
+        val expiryDate = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+            set(2026, java.util.Calendar.JULY, 15, 0, 0, 0)
+        }.timeInMillis
+        val isExpired = System.currentTimeMillis() > expiryDate
+
+
             MyApplicationTheme {
+                if (isExpired) {
+                    ExpiredScreen(onRenewClicked = { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/BeUneeke"))) })
+                    return@MyApplicationTheme
+                }
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
@@ -482,6 +504,9 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         val action = intent.action
         if (action != "com.example.INSTALL_STATUS") return
+
+        // Clear action to prevent infinite launch loop if activity is recreated
+        intent.action = ""
 
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)
         val targetPkg = intent.getStringExtra(PackageInstaller.EXTRA_PACKAGE_NAME) ?: intent.getStringExtra("target_package") ?: packageName
@@ -1464,5 +1489,35 @@ object AppLauncher {
             }
         }
         return null
+    }
+}
+
+@androidx.compose.runtime.Composable
+fun ExpiredScreen(onRenewClicked: () -> Unit) {
+    androidx.compose.foundation.layout.Column(
+        modifier = androidx.compose.ui.Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .background(androidx.compose.ui.graphics.Color.White),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+    ) {
+        androidx.compose.material3.Text(
+            text = "App is Expired",
+            style = androidx.compose.material3.MaterialTheme.typography.headlineLarge,
+            color = androidx.compose.ui.graphics.Color.Red,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.height(16.dp))
+        androidx.compose.material3.Text(
+            text = "Please renew your application to continue using the service.",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            color = androidx.compose.ui.graphics.Color.Black
+        )
+        androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.height(32.dp))
+        androidx.compose.material3.Button(onClick = onRenewClicked) {
+            androidx.compose.material3.Text(text = "Contact Developer")
+        }
     }
 }
