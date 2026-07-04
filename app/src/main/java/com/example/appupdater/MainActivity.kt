@@ -228,21 +228,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // For recursive overlay permission prompt
-    private val overlayPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { _ ->
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !android.provider.Settings.canDrawOverlays(this)) {
-            Log.w("MainActivity", "Overlay permission wasn't granted. Retrying to request overlay permission...")
-            updateStatusInWebView("Draw over other apps permission is required to automatically launch the update. Please enable it.", null)
-            webView?.postDelayed({
-                checkAndProceedWithPermissions()
-            }, 300)
-        } else {
-            checkAndProceedWithPermissions()
-        }
-    }
-
     // For notification permission prompt (Android 13+)
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -1017,23 +1002,6 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     val intent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
                     installPermissionLauncher.launch(intent)
-                }
-                return
-            }
-        }
-
-        // 1.5. Force Draw Over Other Apps / Overlay permission check and action prompt (Required for background launch on Android 10+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (!android.provider.Settings.canDrawOverlays(this)) {
-                updateStatusInWebView("Waiting for draw over other apps permission...", null)
-                try {
-                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
-                        data = android.net.Uri.parse("package:$packageName")
-                    }
-                    overlayPermissionLauncher.launch(intent)
-                } catch (e: Exception) {
-                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
-                    overlayPermissionLauncher.launch(intent)
                 }
                 return
             }
