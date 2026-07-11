@@ -351,24 +351,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stripSignatures(inputApk: File, outputApk: File) {
-        java.util.zip.ZipFile(inputApk).use { zipFile ->
+        java.util.zip.ZipInputStream(java.io.FileInputStream(inputApk)).use { zis ->
             java.util.zip.ZipOutputStream(java.io.FileOutputStream(outputApk)).use { zos ->
-                val entries = zipFile.entries()
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
+                var entry = zis.nextEntry
+                while (entry != null) {
                     if (entry.name.startsWith("META-INF/")) {
+                        zis.closeEntry()
+                        entry = zis.nextEntry
                         continue
                     }
                     val newEntry = java.util.zip.ZipEntry(entry.name)
-                    newEntry.method = entry.method
-                    if (entry.method == java.util.zip.ZipEntry.STORED) {
-                        newEntry.size = entry.size
-                        newEntry.compressedSize = entry.compressedSize
-                        newEntry.crc = entry.crc
+                    // We must use DEFLATED for new entries when reading from ZipInputStream
+                    // because STORED entries require size, compressedSize, and crc to be known in advance,
+                    // which might not be available from ZipInputStream if they were in a Data Descriptor.
+                    newEntry.method = java.util.zip.ZipEntry.DEFLATED
+                    
+                    try {
+                        zos.putNextEntry(newEntry)
+                        zis.copyTo(zos, 256 * 1024)
+                        zos.closeEntry()
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Failed to copy entry: ${entry.name}", e)
                     }
-                    zos.putNextEntry(newEntry)
-                    zipFile.getInputStream(entry).use { it.copyTo(zos, 256 * 1024) }
-                    zos.closeEntry()
+                    
+                    zis.closeEntry()
+                    entry = zis.nextEntry
                 }
             }
         }
