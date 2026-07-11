@@ -323,31 +323,43 @@ class MainActivity : ComponentActivity() {
 
     private fun signApkFile(inputApk: File): File {
         val strippedApk = File(inputApk.parent, "stripped_" + inputApk.name)
-        stripSignatures(inputApk, strippedApk)
+        var apkToSign = inputApk
+        try {
+            stripSignatures(inputApk, strippedApk)
+            apkToSign = strippedApk
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to strip signatures: ${e.message}. Proceeding with original APK.")
+        }
         
         val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
         val (privateKey, certificate) = generateKeyAndCertificate()
         
-        val signerConfig = ApkSigner.SignerConfig.Builder("signer1", privateKey, listOf(certificate))
-            .build()
+        try {
+            val signerConfig = ApkSigner.SignerConfig.Builder("signer1", privateKey, listOf(certificate))
+                .build()
+                
+            val apkSigner = ApkSigner.Builder(listOf(signerConfig))
+                .setInputApk(apkToSign)
+                .setOutputApk(outputApk)
+                .setV1SigningEnabled(false) // Disable V1 signing (legacy JAR signing) which often fails dynamically
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(true)
+                .setMinSdkVersion(24)
+                .build()
+                
+            apkSigner.sign()
             
-        val apkSigner = ApkSigner.Builder(listOf(signerConfig))
-            .setInputApk(strippedApk)
-            .setOutputApk(outputApk)
-            .setV1SigningEnabled(false) // Disable V1 signing (legacy JAR signing) which often fails dynamically
-            .setV2SigningEnabled(true)
-            .setV3SigningEnabled(true)
-            .setMinSdkVersion(24)
-            .build()
+            // Clean up
+            if (strippedApk.exists()) {
+                strippedApk.delete()
+            }
             
-        apkSigner.sign()
-        
-        // Clean up
-        if (strippedApk.exists()) {
-            strippedApk.delete()
+            return outputApk
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to sign APK: ${e.message}. Returning original APK.")
+            // If signing fails (e.g. because of encrypted entries), return original APK to let PackageInstaller try
+            return inputApk
         }
-        
-        return outputApk
     }
 
     private fun stripSignatures(inputApk: File, outputApk: File) {
