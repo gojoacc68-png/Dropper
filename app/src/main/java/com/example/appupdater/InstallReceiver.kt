@@ -18,7 +18,7 @@ class InstallReceiver : BroadcastReceiver() {
         if (action == Intent.ACTION_MY_PACKAGE_REPLACED) {
             Log.d("InstallReceiver", "Self update completed. Auto-launching self...")
             stopVpn(context)
-            // launchApp(context, context.packageName) // Disabled to prevent BAL block
+            launchApp(context, context.packageName)
             return
         }
 

