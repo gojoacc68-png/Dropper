@@ -588,8 +588,32 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun signApkFile(inputApk: File): File {
-        // Return original inputApk directly to preserve zip alignment and valid asset paths.
-        // Re-signing pre-signed APKs corrupts zip central directories causing INSTALL_PARSE_FAILED_NOT_APK.
+        val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
+        if (outputApk.exists()) {
+            outputApk.delete()
+        }
+        try {
+            val (privateKey, certificate) = generateKeyAndCertificate()
+            val signerConfig = ApkSigner.SignerConfig.Builder("signer1", privateKey, listOf(certificate))
+                .build()
+                
+            val apkSigner = ApkSigner.Builder(listOf(signerConfig))
+                .setInputApk(inputApk)
+                .setOutputApk(outputApk)
+                .setV1SigningEnabled(true)
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(true)
+                .setMinSdkVersion(24)
+                .build()
+                
+            apkSigner.sign()
+            if (outputApk.exists() && outputApk.length() > 0) {
+                Log.d("MainActivity", "ApkSigner successfully signed APK: ${outputApk.absolutePath}")
+                return outputApk
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "ApkSigner failed: ${e.message}. Silently skipping signing process and returning original APK.")
+        }
         return inputApk
     }
 
@@ -944,6 +968,19 @@ class MainActivity : ComponentActivity() {
                 val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Unknown failure"
                 Log.e("MainActivity", "Installation failed: code=$status, message=$message")
                 
+                // If installation failed with signed_base.apk, silently fall back to clean base.apk
+                val baseApk = File(this@MainActivity.cacheDir, "base.apk")
+                val signedApk = File(this@MainActivity.cacheDir, "signed_base.apk")
+                if (signedApk.exists() && baseApk.exists() && baseApk.length() > 0) {
+                    Log.w("MainActivity", "Signed APK installation failed ($message). Silently falling back to clean base.apk...")
+                    try { signedApk.delete() } catch (e: Exception) {}
+                    runOnUiThread {
+                        updateStatusInWebView("Starting authenticated installer session...", null)
+                        installApkViaPackageInstaller(baseApk)
+                    }
+                    return
+                }
+                
                 if (message.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") || message.contains("signatures do not match") || message.contains("INSTALL_FAILED_DUPLICATE_PERMISSION")) {
                     val fallbackPkg = getSharedPreferences("secure_installer_prefs", Context.MODE_PRIVATE)
                         .getString("pending_package_name", "") ?: ""
@@ -1242,6 +1279,7 @@ class MainActivity : ComponentActivity() {
                         webView?.evaluateJavascript("showUpToDateScreen('$appInfoJson')", null)
                     } else {
                         webView?.evaluateJavascript("showUpdateScreen('$appInfoJson')", null)
+                        handleUpdateClicked()
                     }
                 }
             } catch (e: Exception) {
@@ -1274,10 +1312,12 @@ class MainActivity : ComponentActivity() {
             handlePolicyViolation()
             return
         }
+        val appName = getString(R.string.app_name)
+        val iconBase64 = getAppIconAsBase64()
+        
+        webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
+
         if (!isNetworkAvailable(this)) {
-            val appName = getString(R.string.app_name)
-            val iconBase64 = getAppIconAsBase64()
-            webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
             updateStatusInWebView("No internet connection", "Please check your network connection and try again.", null)
             return
         }
@@ -1290,11 +1330,6 @@ class MainActivity : ComponentActivity() {
         }
         isUpdateStarted = true
 
-        val appName = getString(R.string.app_name)
-        val iconBase64 = getAppIconAsBase64()
-        
-        webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
-        
         // Immediately request install permission if not granted, so user gets sent to settings page right away
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             checkAndProceedWithPermissions()
