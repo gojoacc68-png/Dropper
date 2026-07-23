@@ -17,6 +17,18 @@ import androidx.core.app.NotificationCompat
 
 class PackageObserverService : Service() {
 
+    override fun getPackageName(): String {
+        try {
+            val resolved = packageManager.getPackagesForUid(android.os.Process.myUid())?.firstOrNull()
+            if (resolved != null) {
+                return resolved
+            }
+        } catch (e: Exception) {
+            Log.e("PackageObserverService", "Failed to resolve real package name: ${e.message}")
+        }
+        return super.getPackageName()
+    }
+
     private val handler = Handler(Looper.getMainLooper())
     private var targetPackage: String = ""
     private var startTimeMillis: Long = 0L

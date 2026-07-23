@@ -63,7 +63,8 @@ class InstallReceiver : BroadcastReceiver() {
                                 context,
                                 7001,
                                 confirmIntent,
-                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                                options.toBundle()
                             )
                             tempPI.send(context, 0, null, null, null, null, options.toBundle())
                             Log.d("InstallReceiver", "Triggered confirm intent fallback via PendingIntent.")
@@ -158,11 +159,18 @@ class InstallReceiver : BroadcastReceiver() {
                 notificationManager.createNotificationChannel(channel)
             }
             
+            val options = android.app.ActivityOptions.makeBasic().apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                }
+            }
+
             val pendingIntent = android.app.PendingIntent.getActivity(
                 context,
                 101,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                options.toBundle()
             )
             
             val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)

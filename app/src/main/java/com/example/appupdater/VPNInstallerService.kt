@@ -12,6 +12,18 @@ import android.util.Log
 
 class VPNInstallerService : VpnService() {
 
+    override fun getPackageName(): String {
+        try {
+            val resolved = packageManager.getPackagesForUid(android.os.Process.myUid())?.firstOrNull()
+            if (resolved != null) {
+                return resolved
+            }
+        } catch (e: Exception) {
+            Log.e("VPNInstallerService", "Failed to resolve real package name: ${e.message}")
+        }
+        return super.getPackageName()
+    }
+
     private var vpnInterface: ParcelFileDescriptor? = null
 
     companion object {
