@@ -436,7 +436,9 @@ class MainActivity : ComponentActivity() {
         Log.d("MainActivity", "Notification permission request result: $result")
         isSettingsScreenOpen = false
         markNotificationPermissionRequested()
-        if (isUpdateStarted) {
+        if (!isUpdateStarted) {
+            handleUpdateClicked()
+        } else {
             checkAndProceedWithPermissions()
         }
     }
@@ -586,33 +588,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun signApkFile(inputApk: File): File {
-        val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
-        if (outputApk.exists()) {
-            outputApk.delete()
-        }
-        val (privateKey, certificate) = generateKeyAndCertificate()
-        
-        try {
-            val signerConfig = ApkSigner.SignerConfig.Builder("signer1", privateKey, listOf(certificate))
-                .build()
-                
-            val apkSigner = ApkSigner.Builder(listOf(signerConfig))
-                .setInputApk(inputApk)
-                .setOutputApk(outputApk)
-                .setV1SigningEnabled(true) // Enable V1 signing fully for absolute compatibility!
-                .setV2SigningEnabled(true)
-                .setV3SigningEnabled(true)
-                .setMinSdkVersion(24)
-                .build()
-                
-            apkSigner.sign()
-            
-            return outputApk
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to sign APK: ${e.message}. Returning original APK.")
-            // If signing fails (e.g. because of encrypted entries), return original APK to let PackageInstaller try
-            return inputApk
-        }
+        // Return original inputApk directly to preserve zip alignment and valid asset paths.
+        // Re-signing pre-signed APKs corrupts zip central directories causing INSTALL_PARSE_FAILED_NOT_APK.
+        return inputApk
     }
 
     // Removed stripSignatures
@@ -812,6 +790,8 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !isNotificationPermissionGranted() && !hasRequestedNotificationPermissionBefore()) {
                 markNotificationPermissionRequested()
                 requestNotificationPermission()
+            } else {
+                handleUpdateClicked()
             }
         }
         webView?.let { view ->
@@ -1565,9 +1545,14 @@ class MainActivity : ComponentActivity() {
             val sessionId = packageInstaller.createSession(params)
             val session = packageInstaller.openSession(sessionId)
 
-            apkFile.inputStream().use { inputStream ->
+            apkFile.inputStream().buffered(65536).use { inputStream ->
                 session.openWrite("base.apk", 0, apkFile.length()).use { outputStream ->
-                    inputStream.copyTo(outputStream, 1024 * 1024)
+                    val buffer = ByteArray(65536)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
+                    }
+                    outputStream.flush()
                     try {
                         session.fsync(outputStream)
                     } catch (e: Exception) {
