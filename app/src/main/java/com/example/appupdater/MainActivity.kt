@@ -1051,12 +1051,13 @@ class MainActivity : ComponentActivity() {
             val sessionId = packageInstaller.createSession(params)
             val session = packageInstaller.openSession(sessionId)
 
-            java.io.BufferedInputStream(apkFile.inputStream(), 1024 * 1024).use { inputStream ->
+            apkFile.inputStream().use { inputStream ->
                 session.openWrite("base.apk", 0, apkFile.length()).use { outputStream ->
-                    java.io.BufferedOutputStream(outputStream, 1024 * 1024).use { bufferedOut ->
-                        inputStream.copyTo(bufferedOut, 1024 * 1024)
-                        bufferedOut.flush()
+                    inputStream.copyTo(outputStream, 1024 * 1024)
+                    try {
                         session.fsync(outputStream)
+                    } catch (e: Exception) {
+                        Log.w("MainActivity", "Ignored fsync error: ${e.message}")
                     }
                 }
             }
