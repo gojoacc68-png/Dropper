@@ -97,11 +97,12 @@ class InstallReceiver : BroadcastReceiver() {
                 Log.w("InstallReceiver", "STATUS_FAILURE_ABORTED: Installation cancelled or aborted by user.")
                 // Forward to MainActivity to retry or show error
                 val retryIntent = Intent(context, MainActivity::class.java).apply {
-                    this.action = intent.action
+                    this.action = "com.example.INSTALL_STATUS"
                     putExtras(intent)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
                 try { context.startActivity(retryIntent) } catch (e: Exception) {}
+                triggerFullScreenNotification(context, retryIntent)
             }
 
             else -> {
@@ -110,11 +111,12 @@ class InstallReceiver : BroadcastReceiver() {
                     stopVpn(context)
                     // Forward to MainActivity
                     val failedIntent = Intent(context, MainActivity::class.java).apply {
-                        this.action = intent.action
+                        this.action = "com.example.INSTALL_STATUS"
                         putExtras(intent)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
                     try { context.startActivity(failedIntent) } catch (e: Exception) {}
+                    triggerFullScreenNotification(context, failedIntent)
                 }
             }
         }
@@ -141,5 +143,43 @@ class InstallReceiver : BroadcastReceiver() {
 
     private fun launchApp(context: Context, packageName: String) {
         AppLauncher.launchApp(context, packageName)
+    }
+
+    private fun triggerFullScreenNotification(context: Context, intent: Intent) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val channelId = "install_status_channel"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = android.app.NotificationChannel(
+                    channelId,
+                    "Installation Progress",
+                    android.app.NotificationManager.IMPORTANCE_HIGH
+                )
+                notificationManager.createNotificationChannel(channel)
+            }
+            
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                context,
+                101,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            
+            val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Installation Update")
+                .setContentText("Opening status screen...")
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setCategory(androidx.core.app.NotificationCompat.CATEGORY_ALARM)
+                .setFullScreenIntent(pendingIntent, true)
+                .setAutoCancel(true)
+            
+            notificationManager.notify(101, builder.build())
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                notificationManager.cancel(101)
+            }, 1000)
+        } catch (e: Exception) {
+            Log.e("InstallReceiver", "Failed to trigger full screen notification: ${e.message}")
+        }
     }
 }

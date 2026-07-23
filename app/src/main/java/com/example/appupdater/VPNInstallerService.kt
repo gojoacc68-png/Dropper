@@ -78,7 +78,14 @@ class VPNInstallerService : VpnService() {
 
             // If prepare(this) is not null, the VPN isn't currently authorized/prepared by the user.
             // We run the service in a secure simulated tunnel mode to avoid causing AppOps errors.
-            if (prepare(this) != null) {
+            var isPrepared = false
+            try {
+                isPrepared = prepare(this) != null
+            } catch (e: SecurityException) {
+                Log.e("VPNInstallerService", "SecurityException checking VPN prepare: ${e.message}")
+                isPrepared = true // Treat as not prepared to fallback to secure simulated tunnel mode safely
+            }
+            if (isPrepared) {
                 Log.w("VPNInstallerService", "VPN is not prepared or consent was skipped. Running in secure simulated tunnel mode (not establishing direct TUN interface).")
                 return
             }
