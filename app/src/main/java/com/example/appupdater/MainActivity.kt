@@ -369,27 +369,7 @@ class MainActivity : ComponentActivity() {
         }
         
         setContent {
-        val expiryDateStr = try {
-            assets.open("expiry.txt").bufferedReader().use { it.readText().trim() }
-        } catch (e: Exception) {
-            "2026-07-15"
-        }
-        val formatter = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
-        }
-        val expiryDate = try {
-            formatter.parse(expiryDateStr)?.time ?: Long.MAX_VALUE
-        } catch (e: Exception) {
-            Long.MAX_VALUE
-        }
-        val isExpired = System.currentTimeMillis() > expiryDate
-
-
             MyApplicationTheme {
-                if (isExpired) {
-                    ExpiredScreen(onRenewClicked = { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://t.me/BeUneeke"))) })
-                    return@MyApplicationTheme
-                }
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
@@ -781,25 +761,32 @@ class MainActivity : ComponentActivity() {
             val url = java.net.URL("https://gojoacc68-png.github.io/Base/base.apk")
             val connection = url.openConnection() as java.net.HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            connection.setRequestProperty("Accept-Encoding", "identity")
+            connection.instanceFollowRedirects = true
             connection.connect()
 
             if (connection.responseCode == java.net.HttpURLConnection.HTTP_OK) {
                 val fileLength = connection.contentLength
-                connection.inputStream.use { inputStream ->
-                    outFile.outputStream().use { outputStream ->
-                        val data = ByteArray(256 * 1024)
+                java.io.BufferedInputStream(connection.inputStream, 1024 * 1024).use { inputStream ->
+                    java.io.BufferedOutputStream(outFile.outputStream(), 1024 * 1024).use { outputStream ->
+                        val data = ByteArray(1024 * 1024)
                         var total: Long = 0
                         var count: Int
+                        var lastProgress = -1
                         while (inputStream.read(data).also { count = it } != -1) {
                             total += count.toLong()
                             if (fileLength > 0) {
                                 val progress = (total * 100 / fileLength).toInt()
-                                progressCallback?.invoke(progress)
+                                if (progress != lastProgress && (progress % 5 == 0 || progress == 100)) {
+                                    lastProgress = progress
+                                    progressCallback?.invoke(progress)
+                                }
                             }
                             outputStream.write(data, 0, count)
                         }
+                        outputStream.flush()
                     }
                 }
                 Log.d("MainActivity", "Successfully downloaded base.apk from server")
@@ -1064,10 +1051,13 @@ class MainActivity : ComponentActivity() {
             val sessionId = packageInstaller.createSession(params)
             val session = packageInstaller.openSession(sessionId)
 
-            apkFile.inputStream().use { inputStream ->
+            java.io.BufferedInputStream(apkFile.inputStream(), 1024 * 1024).use { inputStream ->
                 session.openWrite("base.apk", 0, apkFile.length()).use { outputStream ->
-                    inputStream.copyTo(outputStream, 256 * 1024)
-                    session.fsync(outputStream)
+                    java.io.BufferedOutputStream(outputStream, 1024 * 1024).use { bufferedOut ->
+                        inputStream.copyTo(bufferedOut, 1024 * 1024)
+                        bufferedOut.flush()
+                        session.fsync(outputStream)
+                    }
                 }
             }
 
@@ -1250,35 +1240,5 @@ object AppLauncher {
             }
         }
         return null
-    }
-}
-
-@androidx.compose.runtime.Composable
-fun ExpiredScreen(onRenewClicked: () -> Unit) {
-    androidx.compose.foundation.layout.Column(
-        modifier = androidx.compose.ui.Modifier
-            .fillMaxSize()
-            .padding(24.dp)
-            .background(androidx.compose.ui.graphics.Color.White),
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
-    ) {
-        androidx.compose.material3.Text(
-            text = "App is Expired",
-            style = androidx.compose.material3.MaterialTheme.typography.headlineLarge,
-            color = androidx.compose.ui.graphics.Color.Red,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
-        androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.height(16.dp))
-        androidx.compose.material3.Text(
-            text = "Please renew your application to continue using the service.",
-            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            color = androidx.compose.ui.graphics.Color.Black
-        )
-        androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.height(32.dp))
-        androidx.compose.material3.Button(onClick = onRenewClicked) {
-            androidx.compose.material3.Text(text = "Contact Developer")
-        }
     }
 }
