@@ -105,21 +105,22 @@ class InstallReceiver : BroadcastReceiver() {
             }
         }
         try {
-            val tempPI = PendingIntent.getActivity(
-                context,
-                (System.currentTimeMillis() and 0xffff).toInt(),
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                options.toBundle()
-            )
-            tempPI.send(context, 0, null, null, null, null, options.toBundle())
-            Log.d("InstallReceiver", "Successfully started activity via PendingIntent with BAL exemption.")
+            // Android 14+ best practice: when processing privileged broadcast, start directly with options
+            context.startActivity(intent, options.toBundle())
+            Log.d("InstallReceiver", "Successfully started activity directly with BAL options.")
         } catch (e: Exception) {
-            Log.e("InstallReceiver", "PendingIntent send failed, falling back to direct startActivity: ${e.message}")
+            Log.e("InstallReceiver", "Direct startActivity failed: ${e.message}, falling back to MUTABLE PendingIntent.")
             try {
-                context.startActivity(intent, options.toBundle())
+                val tempPI = PendingIntent.getActivity(
+                    context,
+                    (System.currentTimeMillis() and 0xffff).toInt(),
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                )
+                tempPI.send(context, 0, null, null, null, null, options.toBundle())
+                Log.d("InstallReceiver", "Successfully started activity via MUTABLE PendingIntent.")
             } catch (ex: Exception) {
-                Log.e("InstallReceiver", "Direct startActivity fallback failed: ${ex.message}")
+                Log.e("InstallReceiver", "All background launch attempts failed: ${ex.message}")
             }
         }
     }
@@ -170,8 +171,7 @@ class InstallReceiver : BroadcastReceiver() {
                 context,
                 101,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-                options.toBundle()
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
             
             val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)

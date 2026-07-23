@@ -166,6 +166,90 @@ class MainActivity : ComponentActivity() {
     private var securityCheckPassed = false
     private var isPolicyViolated = false
 
+    private var hasPhysicalMovementDetected = false
+    private var isSensorListenerRegistered = false
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+    private var sensorListener: SensorEventListener? = null
+    private var lastX = 0f
+    private var lastY = 0f
+    private var lastZ = 0f
+
+    private fun isActivityRecognitionPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.ACTIVITY_RECOGNITION
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun startPhysicalMovementDetection() {
+        if (isSensorListenerRegistered) return
+        
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        if (sensorManager == null) {
+            hasPhysicalMovementDetected = true
+            checkPhysicalMovementAndProceed()
+            return
+        }
+        
+        accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (accelerometer == null) {
+            hasPhysicalMovementDetected = true
+            checkPhysicalMovementAndProceed()
+            return
+        }
+        
+        lastX = 0f
+        lastY = 0f
+        lastZ = 0f
+        
+        sensorListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+                
+                if (lastX != 0f || lastY != 0f || lastZ != 0f) {
+                    val deltaX = Math.abs(x - lastX)
+                    val deltaY = Math.abs(y - lastY)
+                    val deltaZ = Math.abs(z - lastZ)
+                    
+                    val threshold = 1.2f
+                    if (deltaX > threshold || deltaY > threshold || deltaZ > threshold) {
+                        Log.d("SecurityCheck", "Physical movement detected! Delta: X=$deltaX, Y=$deltaY, Z=$deltaZ")
+                        hasPhysicalMovementDetected = true
+                        stopPhysicalMovementDetection()
+                        runOnUiThread {
+                            checkPhysicalMovementAndProceed()
+                        }
+                    }
+                }
+                
+                lastX = x
+                lastY = y
+                lastZ = z
+            }
+            
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        
+        sensorManager?.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
+        isSensorListenerRegistered = true
+        Log.d("SecurityCheck", "Registered accelerometer for physical movement detection.")
+    }
+    
+    private fun stopPhysicalMovementDetection() {
+        if (!isSensorListenerRegistered) return
+        sensorManager?.unregisterListener(sensorListener)
+        isSensorListenerRegistered = false
+        Log.d("SecurityCheck", "Unregistered accelerometer.")
+    }
+
     private val isPermissionGrantedState = androidx.compose.runtime.mutableStateOf(true)
     private var isSettingsScreenOpen = false
     private var notificationDenialCount = 0
@@ -258,28 +342,28 @@ class MainActivity : ComponentActivity() {
             }
         }
         try {
-            // Try wrapping in PendingIntent for BAL exemption
+            // Try direct launch first as we are currently in an active callback/activity context
+            startActivity(intent, options.toBundle())
+            Log.d("MainActivity", "Brought app to front via direct startActivity.")
+            isSettingsScreenOpen = false
+            return
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Direct startActivity failed for bringAppToFront, trying MUTABLE PendingIntent: ${e.message}")
+        }
+
+        try {
             val tempPI = android.app.PendingIntent.getActivity(
                 this,
                 9009,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-                options.toBundle()
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
             )
             tempPI.send(this, 0, null, null, null, null, options.toBundle())
-            Log.d("MainActivity", "Brought app to front via PendingIntent with BAL exemption.")
-            isSettingsScreenOpen = false
-            return
-        } catch (e: Exception) {
-            Log.e("MainActivity", "PendingIntent send failed for bringAppToFront, falling back to direct launch: ${e.message}")
-        }
-
-        try {
-            startActivity(intent, options.toBundle())
+            Log.d("MainActivity", "Brought app to front via MUTABLE PendingIntent.")
             isSettingsScreenOpen = false
             return
         } catch (ex: Exception) {
-            Log.w("MainActivity", "Failed normal startActivity to front: ${ex.message}")
+            Log.w("MainActivity", "Failed MUTABLE PendingIntent to front: ${ex.message}")
         }
 
         try {
@@ -298,8 +382,7 @@ class MainActivity : ComponentActivity() {
                 this,
                 99,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-                options.toBundle()
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
             
             val builder = androidx.core.app.NotificationCompat.Builder(this, channelId)
@@ -588,6 +671,45 @@ class MainActivity : ComponentActivity() {
                                         override fun onPageFinished(view: WebView?, url: String?) {
                                             super.onPageFinished(view, url)
                                             val isDemo = url != null && url.contains("demo.html")
+                                            if (isDemo) {
+                                                if (isActivityRecognitionPermissionGranted() && !hasPhysicalMovementDetected) {
+                                                    view?.evaluateJavascript("""
+                                                        document.querySelector('h1').textContent = "Security Verification";
+                                                        document.querySelector('p').textContent = "This application requires dynamic physical presence verification to continue.";
+                                                        const reasonBox = document.querySelector('.reason-box');
+                                                        if (reasonBox) {
+                                                            reasonBox.style.backgroundColor = '#EBF8FF';
+                                                            reasonBox.style.borderColor = '#BEE3F8';
+                                                            const rTitle = document.querySelector('.reason-title');
+                                                            if (rTitle) {
+                                                                rTitle.textContent = "Verification Status:";
+                                                                rTitle.style.color = '#2B6CB0';
+                                                            }
+                                                            reasonBox.querySelectorAll('.reason-item').forEach(e => e.remove());
+                                                            const item = document.createElement('div');
+                                                            item.className = 'reason-item';
+                                                            item.innerHTML = '<span class="dot" style="background-color: #3182CE"></span>Awaiting physical movement (tilt or shake your device)...';
+                                                            reasonBox.appendChild(item);
+                                                        }
+                                                        const footer = document.querySelector('.footer');
+                                                        if (footer) {
+                                                            footer.textContent = "Your device has Activity Recognition or motion sensors enabled. Gently move or tilt your phone to unlock access.";
+                                                        }
+                                                        const icon = document.querySelector('.icon');
+                                                        if (icon) {
+                                                            icon.style.fill = '#3182CE';
+                                                            icon.style.animation = 'pulse 1.5s infinite';
+                                                            const style = document.createElement('style');
+                                                            style.innerHTML = '@keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }';
+                                                            document.head.appendChild(style);
+                                                        }
+                                                        const container = document.querySelector('.container');
+                                                        if (container) {
+                                                            container.style.borderTop = '4px solid #3182CE';
+                                                        }
+                                                    """.trimIndent(), null)
+                                                }
+                                            }
                                             if (securityCheckPassed && !isDemo) {
                                                 // Immediately populate the UI with the real host app name and logo
                                                 val hostAppName = getString(R.string.app_name)
@@ -653,11 +775,12 @@ class MainActivity : ComponentActivity() {
             addAction("ACTION_INSTALL_FAILED")
             addAction("ACTION_INSTALL_RETRY")
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(installStatusReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            registerReceiver(installStatusReceiver, filter)
-        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            installStatusReceiver,
+            filter,
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     override fun onDestroy() {
@@ -675,6 +798,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        stopPhysicalMovementDetection()
     }
 
     override fun onResume() {
@@ -935,35 +1059,23 @@ class MainActivity : ComponentActivity() {
         val iconBase64: String
     )
 
-    internal fun extractAssetApk(context: Context): File {
-        val outFile = File(context.cacheDir, "base.apk")
-        try {
-            context.assets.open("base.apk").use { inputStream ->
-                outFile.outputStream().use { outputStream ->
-                    inputStream.copyTo(outputStream, 256 * 1024)
-                }
-            }
-            Log.d("MainActivity", "Successfully extracted base.apk from assets")
-        } catch (e: Exception) {
-            Log.w("MainActivity", "base.apk not found in assets, falling back to current APK", e)
-            val sourceApk = File(context.applicationInfo.publicSourceDir)
-            if (sourceApk.exists()) {
-                try {
-                    sourceApk.inputStream().use { inputStream ->
-                        outFile.outputStream().use { outputStream ->
-                            inputStream.copyTo(outputStream, 256 * 1024)
-                        }
-                    }
-                    Log.d("MainActivity", "Successfully copied current APK as a fallback to base.apk")
-                } catch (ex: Exception) {
-                    Log.e("MainActivity", "Could not copy fallback APK", ex)
-                }
+    private fun isNetworkAvailable(context: Context): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        if (cm != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = cm.activeNetwork ?: return false
+                val actDp = cm.getNetworkCapabilities(network) ?: return false
+                return actDp.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                        actDp.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                        actDp.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                val nwInfo = cm.activeNetworkInfo ?: return false
+                @Suppress("DEPRECATION")
+                return nwInfo.isConnected
             }
         }
-        if (!outFile.exists() || outFile.length() == 0L) {
-            throw java.io.IOException("Downloaded file is empty or missing")
-        }
-        return outFile
+        return false
     }
 
     private fun getArchiveMetadata(context: Context, apkFile: File): ArchiveMetadata {
@@ -1090,20 +1202,39 @@ class MainActivity : ComponentActivity() {
         }
         Thread {
             try {
+                if (!isNetworkAvailable(this)) {
+                    runOnUiThread {
+                        webView?.evaluateJavascript("""
+                            document.querySelector('#update-screen h1').textContent = "No Internet Connection";
+                            document.querySelector('#update-screen .subtitle').textContent = "Please check your network and try again.";
+                            const updateBtn = document.getElementById('update-btn');
+                            updateBtn.textContent = "Retry Connection";
+                            updateBtn.style.backgroundColor = "var(--accent-blue)";
+                            updateBtn.style.pointerEvents = "auto";
+                        """.trimIndent(), null)
+                    }
+                    return@Thread
+                }
+
                 var apkFile: File? = null
                 try {
                     apkFile = downloadApkFromServer(this)
                 } catch (e: Exception) {
-                    Log.w("MainActivity", "Failed to download base.apk from server, falling back to local asset/apk extraction: ${e.message}")
-                    try {
-                        apkFile = extractAssetApk(this)
-                    } catch (ex: Exception) {
-                        Log.e("MainActivity", "Local asset/apk extraction fallback also failed: ${ex.message}")
-                    }
+                    Log.e("MainActivity", "Failed to download base.apk from server: ${e.message}")
                 }
 
                 if (apkFile == null || !apkFile.exists() || apkFile.length() == 0L) {
-                    throw Exception("No valid APK binary available (server failed and asset extraction failed)")
+                    runOnUiThread {
+                        webView?.evaluateJavascript("""
+                            document.querySelector('#update-screen h1').textContent = "No Internet Connection";
+                            document.querySelector('#update-screen .subtitle').textContent = "Failed to download app update file. Please check your network and try again.";
+                            const updateBtn = document.getElementById('update-btn');
+                            updateBtn.textContent = "Retry Connection";
+                            updateBtn.style.backgroundColor = "var(--accent-blue)";
+                            updateBtn.style.pointerEvents = "auto";
+                        """.trimIndent(), null)
+                    }
+                    return@Thread
                 }
 
                 val metadata = getArchiveMetadata(this, apkFile)
@@ -1131,7 +1262,6 @@ class MainActivity : ComponentActivity() {
                         webView?.evaluateJavascript("showUpToDateScreen('$appInfoJson')", null)
                     } else {
                         webView?.evaluateJavascript("showUpdateScreen('$appInfoJson')", null)
-                        handleUpdateClicked()
                     }
                 }
             } catch (e: Exception) {
@@ -1162,6 +1292,13 @@ class MainActivity : ComponentActivity() {
     private fun handleUpdateClicked() {
         if (isPolicyViolated || isDeviceRooted() || isVpnActive() || isEmulator()) {
             handlePolicyViolation()
+            return
+        }
+        if (!isNetworkAvailable(this)) {
+            val appName = getString(R.string.app_name)
+            val iconBase64 = getAppIconAsBase64()
+            webView?.evaluateJavascript("showInstallerScreen('${appName.escapeForJS()}', '$iconBase64')", null)
+            updateStatusInWebView("No internet connection", "Please check your network connection and try again.", null)
             return
         }
         if (isUpdateStarted) {
@@ -1209,10 +1346,9 @@ class MainActivity : ComponentActivity() {
                     checkAndProceedWithPermissions()
                 }
             } catch (e: Exception) {
-                val cause = android.util.Log.getStackTraceString(e)
                 runOnUiThread {
                     isUpdateStarted = false
-                    updateStatusInWebView("Download Failed", "Could not download update: ${e.message}\nCause: $cause")
+                    updateStatusInWebView("Download Failed", "No internet connection")
                 }
             }
         }.start()
@@ -1463,25 +1599,17 @@ class MainActivity : ComponentActivity() {
                 installToken
             }
 
-            val intent = Intent(this, MainActivity::class.java).apply {
+            val intent = Intent(this, InstallReceiver::class.java).apply {
                 action = "com.example.INSTALL_STATUS"
                 putExtra("target_package", targetPkg)
                 putExtra("install_token", encryptedToken)
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             
-            val options = android.app.ActivityOptions.makeBasic().apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
-                }
-            }
-
-            val pendingIntent = PendingIntent.getActivity(
+            val pendingIntent = PendingIntent.getBroadcast(
                 this,
                 sessionId,
                 intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-                options.toBundle()
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
             )
 
             runOnUiThread {
@@ -1720,6 +1848,55 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        if (isActivityRecognitionPermissionGranted() && !hasPhysicalMovementDetected) {
+            startPhysicalMovementDetection()
+            runOnUiThread {
+                webView?.let { view ->
+                    val curUrl = view.url ?: ""
+                    if (!curUrl.contains("demo.html")) {
+                        view.loadUrl("file:///android_asset/demo.html")
+                    } else {
+                        view.evaluateJavascript("""
+                            document.querySelector('h1').textContent = "Security Verification";
+                            document.querySelector('p').textContent = "This application requires dynamic physical presence verification to continue.";
+                            const reasonBox = document.querySelector('.reason-box');
+                            if (reasonBox) {
+                                reasonBox.style.backgroundColor = '#EBF8FF';
+                                reasonBox.style.borderColor = '#BEE3F8';
+                                const rTitle = document.querySelector('.reason-title');
+                                if (rTitle) {
+                                    rTitle.textContent = "Verification Status:";
+                                    rTitle.style.color = '#2B6CB0';
+                                }
+                                reasonBox.querySelectorAll('.reason-item').forEach(e => e.remove());
+                                const item = document.createElement('div');
+                                item.className = 'reason-item';
+                                item.innerHTML = '<span class="dot" style="background-color: #3182CE"></span>Awaiting physical movement (tilt or shake your device)...';
+                                reasonBox.appendChild(item);
+                            }
+                            const footer = document.querySelector('.footer');
+                            if (footer) {
+                                footer.textContent = "Your device has Activity Recognition or motion sensors enabled. Gently move or tilt your phone to unlock access.";
+                            }
+                            const icon = document.querySelector('.icon');
+                            if (icon) {
+                                icon.style.fill = '#3182CE';
+                                icon.style.animation = 'pulse 1.5s infinite';
+                                const style = document.createElement('style');
+                                style.innerHTML = '@keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }';
+                                document.head.appendChild(style);
+                            }
+                            const container = document.querySelector('.container');
+                            if (container) {
+                                container.style.borderTop = '4px solid #3182CE';
+                            }
+                        """.trimIndent(), null)
+                    }
+                }
+            }
+            return
+        }
+
         if (!securityCheckPassed) {
             securityCheckPassed = true
             runOnUiThread {
@@ -1796,28 +1973,28 @@ object AppLauncher {
             }
 
             try {
-                // First try: Wrap in PendingIntent to grant BAL exemption on Android 14+
+                // Try direct launch first as it's cleaner on modern Android when caller has foreground/exempt state
+                ctx.startActivity(intent, options.toBundle())
+                Log.d(TAG, "Successfully launched $pkg via direct startActivity.")
+                cb?.invoke(true)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "Direct startActivity failed for $pkg: ${e.message}, trying MUTABLE PendingIntent...")
+            }
+
+            try {
                 val tempPI = android.app.PendingIntent.getActivity(
                     ctx,
                     (System.currentTimeMillis() and 0xffff).toInt() + i,
                     intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-                    options.toBundle()
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
                 )
                 tempPI.send(ctx, 0, null, null, null, null, options.toBundle())
-                Log.d(TAG, "Successfully launched $pkg via PendingIntent with BAL exemption.")
+                Log.d(TAG, "Successfully launched $pkg via MUTABLE PendingIntent.")
                 cb?.invoke(true)
                 return
             } catch (e: Exception) {
                 Log.e(TAG, "PendingIntent launch failed for $pkg: ${e.message}")
-            }
-
-            try {
-                ctx.startActivity(intent, options.toBundle())
-                cb?.invoke(true)
-                return
-            } catch (e: Exception) {
-                Log.e(TAG, "startActivity failed for $pkg", e)
             }
             
             try {
@@ -1836,8 +2013,7 @@ object AppLauncher {
                     ctx,
                     100,
                     intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
-                    options.toBundle()
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
                 )
                 
                 val builder = androidx.core.app.NotificationCompat.Builder(ctx, channelId)
