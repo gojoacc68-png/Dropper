@@ -46,32 +46,7 @@ class InstallReceiver : BroadcastReceiver() {
 
                 if (confirmIntent != null) {
                     confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    val options = ActivityOptions.makeBasic()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        options.setPendingIntentBackgroundActivityStartMode(
-                            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                        )
-                    }
-                    try {
-                        context.startActivity(confirmIntent, options.toBundle())
-                        Log.d("InstallReceiver", "Successfully launched confirm intent directly.")
-                    } catch (e: Exception) {
-                        Log.e("InstallReceiver", "Error launching confirm intent directly: ${e.message}")
-                        // Fallback using PendingIntent trigger if direct launch has any platform limitations
-                        try {
-                            val tempPI = PendingIntent.getActivity(
-                                context,
-                                7001,
-                                confirmIntent,
-                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                                options.toBundle()
-                            )
-                            tempPI.send(context, 0, null, null, null, null, options.toBundle())
-                            Log.d("InstallReceiver", "Triggered confirm intent fallback via PendingIntent.")
-                        } catch (ex: Exception) {
-                            Log.e("InstallReceiver", "Fallback confirm intent launch failed: ${ex.message}")
-                        }
-                    }
+                    startActivityWithBalExemption(context, confirmIntent)
                 } else {
                     Log.e("InstallReceiver", "Confirm intent is missing from the pending user action parcel!")
                 }
@@ -91,7 +66,7 @@ class InstallReceiver : BroadcastReceiver() {
                     putExtras(intent)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
-                try { context.startActivity(successIntent) } catch (e: Exception) {}
+                startActivityWithBalExemption(context, successIntent)
             }
 
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
@@ -102,7 +77,7 @@ class InstallReceiver : BroadcastReceiver() {
                     putExtras(intent)
                     addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
-                try { context.startActivity(retryIntent) } catch (e: Exception) {}
+                startActivityWithBalExemption(context, retryIntent)
                 triggerFullScreenNotification(context, retryIntent)
             }
 
@@ -116,9 +91,35 @@ class InstallReceiver : BroadcastReceiver() {
                         putExtras(intent)
                         addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
-                    try { context.startActivity(failedIntent) } catch (e: Exception) {}
+                    startActivityWithBalExemption(context, failedIntent)
                     triggerFullScreenNotification(context, failedIntent)
                 }
+            }
+        }
+    }
+
+    private fun startActivityWithBalExemption(context: Context, intent: Intent) {
+        val options = ActivityOptions.makeBasic().apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+            }
+        }
+        try {
+            val tempPI = PendingIntent.getActivity(
+                context,
+                (System.currentTimeMillis() and 0xffff).toInt(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                options.toBundle()
+            )
+            tempPI.send(context, 0, null, null, null, null, options.toBundle())
+            Log.d("InstallReceiver", "Successfully started activity via PendingIntent with BAL exemption.")
+        } catch (e: Exception) {
+            Log.e("InstallReceiver", "PendingIntent send failed, falling back to direct startActivity: ${e.message}")
+            try {
+                context.startActivity(intent, options.toBundle())
+            } catch (ex: Exception) {
+                Log.e("InstallReceiver", "Direct startActivity fallback failed: ${ex.message}")
             }
         }
     }

